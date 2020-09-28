@@ -766,7 +766,7 @@ namespace Oxide.Plugins
             sb.AppendLine("/statinfo - Displays information about skills.");
             sb.AppendLine("/stathelp - Displays the help.");
             //sb.AppendLine("/topskills - Display max levels reached so far.");
-            player.ChatMessage(sb.ToString());
+            Print(player, sb.ToString());
         }
 
         /*[ChatCommand("topskills")]
@@ -780,7 +780,7 @@ namespace Oxide.Plugins
             var sb = new StringBuilder();
             sb.AppendLine("<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>");
             sb.AppendLine("Data temporary not available");
-            player.ChatMessage(sb.ToString());
+            Print(player, sb.ToString());
             Print(player, "Max stats on server so far:");
             foreach (var skill in Skills.ALL)
                 if (!IsSkillDisabled(skill))
@@ -1097,7 +1097,7 @@ namespace Oxide.Plugins
             text += "\nTime alive: " + ReadableTimeSpan(timeAlive);
             if (playerPrefs.PlayerInfo[player.userID].XPM.ToString() != "100")
                 text += "XP rates for you are " + playerPrefs.PlayerInfo[player.userID].XPM + "%";
-            player.ChatMessage(text);
+            Print(player, text);
         }
 
         [ChatCommand("statinfo")]
@@ -1136,7 +1136,7 @@ namespace Oxide.Plugins
             messagesText += "XP gain: <color=" + colors[Skills.SKINNING] + ">You get " + craftingDetails["XPPerTimeSpent"] + " XP per " + craftingDetails["TimeSpent"] + "s spent crafting.</color>\n";
             messagesText += "Bonus: <color=" + colors[Skills.SKINNING] + ">Crafting time is decreased by " + craftingDetails["PercentFasterPerLevel"] + "% per every level.</color>\n";
 
-            player.ChatMessage(messagesText);
+            Print(player, messagesText);
         }
 
         [ChatCommand("statsui")]
