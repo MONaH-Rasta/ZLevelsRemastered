@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ZLevelsRemastered", "Default", "2.9.20")]
+    [Info("ZLevelsRemastered", "Default", "2.9.22")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
 
     
@@ -274,7 +274,7 @@ namespace Oxide.Plugins
             if (!permission.PermissionExists(permissionNameXP)) permission.RegisterPermission(permissionNameXP, this);
             if ((_craftData = Interface.GetMod().DataFileSystem.ReadObject<CraftData>("ZLevelsCraftDetails")) == null || !_craftData.CraftList.Any())
             {
-                GenerateItems(true);
+                GenerateItems();
                 _craftData = Interface.GetMod().DataFileSystem.ReadObject<CraftData>("ZLevelsCraftDetails");
             }
 
@@ -1163,12 +1163,12 @@ namespace Oxide.Plugins
             {
                 DestroyGUI(player);
                 playerPrefs.PlayerInfo[player.userID].ONOFF = false;
-                Print(player, msg("PluginPlayerOff"));
+                Print(player, msg("PluginPlayerOff", player.UserIDString));
             }
             else
             {
                 playerPrefs.PlayerInfo[player.userID].ONOFF = true;
-                Print(player, msg("PluginPlayerOn"));
+                Print(player, msg("PluginPlayerOn", player.UserIDString));
                 if (playerPrefs.PlayerInfo[player.userID].CUI)
                     CreateGUI(player);
             }
