@@ -273,8 +273,8 @@ namespace Oxide.Plugins
             if (!permission.PermissionExists(permissionName)) permission.RegisterPermission(permissionName, this);
             if (!permission.PermissionExists(permissionNameXP)) permission.RegisterPermission(permissionNameXP, this);
             if ((_craftData = Interface.GetMod().DataFileSystem.ReadObject<CraftData>("ZLevelsCraftDetails")) == null || !_craftData.CraftList.Any())
-            {
-                GenerateItems();
+            {//we have null or empty _craftData, we need to force generation of new one
+                GenerateItems(true);
                 _craftData = Interface.GetMod().DataFileSystem.ReadObject<CraftData>("ZLevelsCraftDetails");
             }
 
