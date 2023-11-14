@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ZLevels Remastered", "Default", "2.9.8")]
+    [Info("ZLevels Remastered", "Default", "2.9.9")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
     class ZLevelsRemastered : RustPlugin
     {
@@ -302,12 +302,12 @@ namespace Oxide.Plugins
 				newSaveDetected = true;
 		}
 
-		void SaveData() => Interface.Oxide.DataFileSystem.WriteObject(this.Title, playerPrefs);
+		void SaveData() => Interface.Oxide.DataFileSystem.WriteObject(this.Name, playerPrefs);
 
 		void OnServerInitialized()
 		{
 			CheckCollectible();
-			playerPrefs = Interface.GetMod().DataFileSystem.ReadObject<PlayerData>(this.Title) ?? new PlayerData();
+			playerPrefs = Interface.GetMod().DataFileSystem.ReadObject<PlayerData>(this.Name) ?? new PlayerData();
 			if (newSaveDetected || (playerPrefs == null || playerPrefs.PlayerInfo == null || playerPrefs.PlayerInfo.Count == 0))
 			{
 				playerPrefs = new PlayerData();
@@ -930,7 +930,7 @@ namespace Oxide.Plugins
                 return;
             }
 			playerPrefs = new PlayerData();
-			Interface.Oxide.DataFileSystem.WriteObject(this.Title, playerPrefs);
+			Interface.Oxide.DataFileSystem.WriteObject(this.Name, playerPrefs);
 			foreach (var player in BasePlayer.activePlayerList)
 			{
 				if (player != null)
