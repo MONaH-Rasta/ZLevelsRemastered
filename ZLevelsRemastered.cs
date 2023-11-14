@@ -15,9 +15,8 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ZLevelsRemastered", "nivex", "3.0.2")]
+    [Info("ZLevelsRemastered", "nivex", "3.0.3")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
-
 
     class ZLevelsRemastered : RustPlugin
     {
@@ -1383,8 +1382,8 @@ namespace Oxide.Plugins
             var Level = getLevel(player.userID, skill);
             var Points = getPoints(player.userID, skill);
             item.amount = Mathf.CeilToInt((float)(item.amount * getGathMult(Level, skill)));
-            var pointsToGet = (int)pointsPerHitCurrent[skill];
-            var pointsToGetPowerTool = (int)pointsPerHitPowerToolCurrent[skill];
+            var pointsToGet = pointsPerHitCurrent.ContainsKey(skill) ? (int)pointsPerHitCurrent[skill] : 0;
+            var pointsToGetPowerTool = pointsPerHitPowerToolCurrent.ContainsKey(skill) ? (int)pointsPerHitPowerToolCurrent[skill] : 0;
             var xpMultiplier = Convert.ToInt64(pi.XPM);
             if (powerTool == true)
             {
@@ -1397,13 +1396,14 @@ namespace Oxide.Plugins
             getPointsLevel(Points, skill);
             try
             {
+                var color = colors[skill];
                 if (Points >= getLevelPoints(Level + 1))
                 {
                     var maxLevel = (int)levelCaps[skill] > 0 && Level + 1 > (int)levelCaps[skill];
                     if (!maxLevel)
                     {
                         Level = getPointsLevel(Points, skill);
-                        PrintToChat(player, string.Format("<color=" + colors[skill] + '>' + msg("LevelUpText", player.UserIDString) + "</color>", msg(skill + "Skill", player.UserIDString), Level, Points, getLevelPoints(Level + 1), ((getGathMult(Level, skill) - 1) * 100).ToString("0.##")));
+                        PrintToChat(player, string.Format("<color=" + color + '>' + msg("LevelUpText", player.UserIDString) + "</color>", msg(skill + "Skill", player.UserIDString), Level, Points, getLevelPoints(Level + 1), ((getGathMult(Level, skill) - 1) * 100).ToString("0.##")));
                         if (enableLevelupBroadcast)
                         {
                             if (!levelAnnounce.Contains(Level))
@@ -1411,7 +1411,7 @@ namespace Oxide.Plugins
                             foreach (var target in BasePlayer.activePlayerList.Where(x => x.userID != player.userID))
                             {
                                 if (hasRights(target.UserIDString) && GetPlayerInfo(target).ONOFF)
-                                    PrintToChat(target, string.Format(msg("LevelUpTextBroadcast", target.UserIDString), player.displayName, Level, colors[skill], msg(skill + "Skill", target.UserIDString)));
+                                    PrintToChat(target, string.Format(msg("LevelUpTextBroadcast", target.UserIDString), player.displayName, Level, color, msg(skill + "Skill", target.UserIDString)));
                             }
                         }
                     }
@@ -1441,17 +1441,18 @@ namespace Oxide.Plugins
             {
                 if (Points >= getLevelPoints(Level + 1))
                 {
+                    var color = colors[skill];
                     var maxLevel = (int)levelCaps[skill] > 0 && Level + 1 > (int)levelCaps[skill];
                     if (!maxLevel)
                     {
                         Level = getPointsLevel(Points, skill);
-                        PrintToChat(player, string.Format("<color=" + colors[skill] + '>' + msg("LevelUpText", player.UserIDString) + "</color>", msg(skill + "Skill", player.UserIDString), Level, Points, getLevelPoints(Level + 1), ((getGathMult(Level, skill) - 1) * 100).ToString("0.##")));
+                        PrintToChat(player, string.Format("<color=" + color + '>' + msg("LevelUpText", player.UserIDString) + "</color>", msg(skill + "Skill", player.UserIDString), Level, Points, getLevelPoints(Level + 1), ((getGathMult(Level, skill) - 1) * 100).ToString("0.##")));
                         if (enableLevelupBroadcast)
                         {
                             foreach (var target in BasePlayer.activePlayerList.Where(x => x.userID != player.userID))
                             {
                                 if (hasRights(target.UserIDString) && GetPlayerInfo(target).ONOFF)
-                                    PrintToChat(target, string.Format(msg("LevelUpTextBroadcast", target.UserIDString), player.displayName, Level, colors[skill], msg(skill + "Skill", target.UserIDString)));
+                                    PrintToChat(target, string.Format(msg("LevelUpTextBroadcast", target.UserIDString), player.displayName, Level, color, msg(skill + "Skill", target.UserIDString)));
                             }
                         }
                     }
