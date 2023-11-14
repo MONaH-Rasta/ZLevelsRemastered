@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ZLevels Remastered", "Default", "2.9.9")]
+    [Info("ZLevels Remastered", "Default", "2.9.10")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
     class ZLevelsRemastered : RustPlugin
     {
@@ -617,7 +617,7 @@ namespace Oxide.Plugins
 				Puts("Nightbonus points disabled");
 		}
 
-		void OnGrowableGather(GrowableEntity growable, Item item, BasePlayer player)
+		void OnGrowableGathered(GrowableEntity growable, Item item, BasePlayer player)
 		{
 			if (!initialized || !enableCropGather || item == null || player == null || !hasRights(player.UserIDString) || !playerPrefs.PlayerInfo[player.userID].ONOFF) return;
 			var skillName = string.Empty;
