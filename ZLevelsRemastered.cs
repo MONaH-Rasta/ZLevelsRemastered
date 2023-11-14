@@ -8,9 +8,15 @@ using Oxide.Core.Libraries.Covalence;
 using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
+/*
+ * This update 2.9.3
+ * Patched OnGrowableGathered
+ * Added the new berry seeds to OnCollectiblePickup/config to support leveling.
+ */
+
 namespace Oxide.Plugins
 {
-    [Info("ZLevelsRemastered", "Default", "2.9.22")]
+    [Info("ZLevelsRemastered", "Default", "3.0.0")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
 
     
@@ -557,6 +563,18 @@ namespace Oxide.Plugins
         }
                 
         void OnDispenserBonus(ResourceDispenser dispenser, BaseEntity entity, Item item) => OnDispenserGather(dispenser, entity, item);
+
+        object OnGrowableGathered(GrowableEntity plant, Item item, BasePlayer player)
+        {
+            if (!initialized || !enableCropGather || item == null || player == null || !hasRights(player.UserIDString) || !playerPrefs.PlayerInfo[player.userID].ONOFF) return true;
+            var skillName = string.Empty;
+            if (IsSkillDisabled(Skills.ACQUIRE))
+                skillName = Skills.SKINNING;
+            else
+                skillName = Skills.ACQUIRE;
+            levelHandler(player, item, skillName);
+            return null;
+        }
                 
         void OnCollectiblePickup(Item item, BasePlayer player, CollectibleEntity entity)
         {
@@ -583,6 +601,12 @@ namespace Oxide.Plugins
                     case "seed.hemp":
                     case "seed.pumpkin":
                     case "seed.corn":
+                    case "seed.white.berry":
+                    case "seed.yellow.berry":
+                    case "seed.red.berry":
+                    case "seed.green.berry":
+                    case "seed.blue.berry":
+                    case "seed.black.berry":
                         skillName = Skills.SKINNING;
                         break;
                     case "metal.ore":
@@ -627,17 +651,6 @@ namespace Oxide.Plugins
             }
             if (logEnabledBonusConsole)
                 Puts("Nightbonus points disabled");
-        }
-        
-        void OnGrowableGathered(GrowableEntity plant, Item item, BasePlayer player)
-        {
-            if (!initialized || !enableCropGather || item == null || player == null || !hasRights(player.UserIDString) || !playerPrefs.PlayerInfo[player.userID].ONOFF) return;
-            var skillName = string.Empty;
-            if (IsSkillDisabled(Skills.ACQUIRE))
-                skillName = Skills.SKINNING;
-            else
-                skillName = Skills.ACQUIRE;
-            levelHandler(player, item, skillName);
         }
 
         object OnItemCraft(ItemCraftTask task, BasePlayer crafter)
