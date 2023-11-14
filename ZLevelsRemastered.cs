@@ -9,13 +9,13 @@ using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
 /*
- * This update 3.0.2
- * Fixed levelHandler.KeyNotFoundException (OnCollectiblePickup, OnDispenserGather, etc)
+ * This update 3.0.4
+ * Fixed levelHandler not granting next level in some cases
  */
 
 namespace Oxide.Plugins
 {
-    [Info("ZLevelsRemastered", "nivex", "3.0.3")]
+    [Info("ZLevelsRemastered", "nivex", "3.0.4")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
 
     class ZLevelsRemastered : RustPlugin
@@ -1404,10 +1404,8 @@ namespace Oxide.Plugins
                     {
                         Level = getPointsLevel(Points, skill);
                         PrintToChat(player, string.Format("<color=" + color + '>' + msg("LevelUpText", player.UserIDString) + "</color>", msg(skill + "Skill", player.UserIDString), Level, Points, getLevelPoints(Level + 1), ((getGathMult(Level, skill) - 1) * 100).ToString("0.##")));
-                        if (enableLevelupBroadcast)
+                        if (enableLevelupBroadcast && levelAnnounce.Contains(Level))
                         {
-                            if (!levelAnnounce.Contains(Level))
-                                return;
                             foreach (var target in BasePlayer.activePlayerList.Where(x => x.userID != player.userID))
                             {
                                 if (hasRights(target.UserIDString) && GetPlayerInfo(target).ONOFF)
