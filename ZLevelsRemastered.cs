@@ -11,16 +11,9 @@ using UnityEngine;
 using Newtonsoft.Json;
 using Rust;
 
-//nice nighttime only idea without ui https://umod.org/community/zlevels-remastered/43041-request-night-time-farming-bonus-plugin
-
-/*
-Fixed rounding to zero issues preventing gathering skills from working
-Added support for Time Of Day plugin
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("ZLevels Remastered", "nivex", "3.1.7")]
+    [Info("ZLevels Remastered", "nivex", "3.2.0")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
 
     class ZLevelsRemastered : RustPlugin
@@ -52,6 +45,7 @@ namespace Oxide.Plugins
         private class CraftData
         {
             public Dictionary<string, CraftInfo> CraftList = new Dictionary<string, CraftInfo>();
+            public CraftData() { }
         }
 
         private class CraftInfo
@@ -60,6 +54,7 @@ namespace Oxide.Plugins
             public int MinBulkCraft;
             public string shortName;
             public bool Enabled;
+            public CraftInfo() { }
         }
 
         private class StoredData
@@ -85,7 +80,7 @@ namespace Oxide.Plugins
         }
 
         private class PlayerInfo
-        {   
+        {
             [JsonProperty(PropertyName = "AL")]
             public double ACQUIRE_LEVEL = 1;
 
@@ -127,6 +122,8 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "ONOFF")]
             public bool ENABLED = true;
+
+            public PlayerInfo() { }
         }
 
         #region Main
@@ -163,14 +160,14 @@ namespace Oxide.Plugins
         {
             if (config.generic.wipeDataOnNewSave)
             {
+                Puts("New save detected...");
                 newSaveDetected = true;
             }
         }
 
         private void OnServerInitialized()
-        {            
+        {
             LoadData();
-
             if (config.nightbonus.enableNightBonus && TOD_Sky.Instance.IsNight)
             {
                 pointsPerHitCurrent = config.nightbonus.pointsPerHitAtNight;
@@ -211,7 +208,7 @@ namespace Oxide.Plugins
 
         private void OnEntityDeath(BasePlayer player, HitInfo hitInfo)
         {
-            if (!IsValid(player) || isZoneExcluded(player))
+            if (hitInfo == null || !IsValid(player) || isZoneExcluded(player))
             {
                 return;
             }
@@ -230,10 +227,10 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (hitInfo?.damageTypes != null && hitInfo.damageTypes.Has(DamageType.Suicide))
-            {
-                return;
-            }
+            bool isSuicide = hitInfo.damageTypes.Has(DamageType.Suicide) && (player.IsAdmin || player.IsDeveloper || !player.CanSuicide());
+
+            if (!config.generic.penaltyOnSuicide && isSuicide) return;
+            if (!config.generic.penaltyOnDeath && !isSuicide) return;
 
             if (EventManager?.Call("IsEventPlayer", player) != null)
             {
@@ -251,7 +248,7 @@ namespace Oxide.Plugins
             {
                 if (IsSkillEnabled(skill))
                 {
-                    var penalty = GetPenalty(player, pi, skill);
+                    var penalty = GetPenalty(player, pi, skill, isSuicide);
 
                     if (penalty > 0)
                     {
@@ -360,19 +357,19 @@ namespace Oxide.Plugins
 
         private List<string> _warnings = new List<string>();
 
-        private void OnCollectiblePickup(CollectibleEntity collectible, BasePlayer player)
+        private object OnCollectiblePickup(CollectibleEntity collectible, BasePlayer player)
         {
             if (!IsValid(player) || !hasRights(player.UserIDString))
-                return;
+                return null;
 
             var pi = GetPlayerInfo(player);
 
             if (!pi.ENABLED)
-                return;
+                return null;
 
             bool enabled;
             if (config.functions.enabledCollectibleEntity.TryGetValue(collectible.ShortPrefabName, out enabled) && !enabled)
-                return;
+                return null;
 
             Skills skill;
 
@@ -413,7 +410,7 @@ namespace Oxide.Plugins
                         skill = config.settings.AcquireWood ? Skills.ACQUIRE : Skills.WOODCUTTING;
                         break;
                     default:
-                        skill = IsSkillEnabled(Skills.ACQUIRE) ? Skills.ACQUIRE : Skills.SKINNING; 
+                        skill = IsSkillEnabled(Skills.ACQUIRE) ? Skills.ACQUIRE : Skills.SKINNING;
                         if (!_warnings.Contains(itemAmount.itemDef.shortname))
                         {
                             PrintWarning($"WARNING: {player} picked up undefined item: {itemAmount.itemDef.shortname}. Defaulting to {skill} skill.");
@@ -426,9 +423,13 @@ namespace Oxide.Plugins
                 {
                     int prevAmount = (int)itemAmount.amount;
                     itemAmount.amount = levelHandler(pi, player, prevAmount, skill, collectible);
-                    Interface.CallHook("OnZLevelCollectiblePickup", itemAmount, player, collectible, prevAmount, itemAmount.amount);
+                    if (Interface.CallHook("OnZLevelCollectiblePickup", itemAmount, player, collectible, prevAmount, itemAmount.amount) != null)
+                    {
+                        return true;
+                    }
                 }
             }
+            return null;
         }
 
         private void OnTimeSunset()
@@ -491,7 +492,7 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private object OnItemCraft(ItemCraftTask task, BasePlayer crafter)
+        private object OnItemCraft(ItemCraftTask task, BasePlayer crafter, Item fromTempBlueprint)
         {
             if (!hasRights(crafter.UserIDString)) return null;
 
@@ -499,36 +500,47 @@ namespace Oxide.Plugins
 
             if (!pi.ENABLED) return null;
 
-            var Level = getLevel(pi, Skills.CRAFTING);
+            var bypassCraftLevelRequirement = CanInstantCraftNoLevelRequirement(crafter);
             var craftingTime = task.blueprint.time;
-            var amountToReduce = task.blueprint.time * (float)((Level * config.settings.craftingDetails.percent) / 100);
 
-            craftingTime -= amountToReduce;
-            if (craftingTime < 0)
-                craftingTime = 0;
-            if (craftingTime == 0 && CanBulkCraft(crafter))
+            if (bypassCraftLevelRequirement)
             {
-                try
+                craftingTime = 0;
+            }
+            else if (IsSkillEnabled(Skills.CRAFTING))
+            {
+                craftingTime -= task.blueprint.time * (float)((pi.CRAFTING_LEVEL * config.settings.craftingDetails.percent) / 100);
+            }
+            else return null;
+
+            if (craftingTime <= 0)
+            {
+                craftingTime = 0;
+
+                foreach (var craftInfo in _craftData.CraftList.Values)
                 {
-                    foreach (var craftInfo in _craftData.CraftList.Values)
+                    if (!craftInfo.Enabled || craftInfo.shortName != task.blueprint.targetItem.shortname)
                     {
-                        if (!craftInfo.Enabled || craftInfo.shortName != task.blueprint.targetItem.shortname)
+                        continue;
+                    }
+                    if (task.amount >= craftInfo.MinBulkCraft && task.amount <= craftInfo.MaxBulkCraft && task.amount > 0)
+                    {
+                        var stacks = GetStacks(task.amount * task.blueprint.amountToCreate, task.blueprint.targetItem.stackable);
+                        if (!HasPlace(crafter, stacks))
                         {
-                            continue;
+                            ReturnCraft(task, crafter);
+                            return true;
                         }
-                        if (task.amount >= craftInfo.MinBulkCraft && task.amount <= craftInfo.MaxBulkCraft && task.amount > 0)
+                        if (bypassCraftLevelRequirement || CanInstantCraft(crafter))
                         {
                             if (!task.blueprint.name.Contains("(Clone)"))
                                 task.blueprint = UnityEngine.Object.Instantiate(task.blueprint);
                             task.blueprint.amountToCreate *= task.amount;
                             crafter.inventory.crafting.FinishCrafting(task);
-                            return false;
+                            task.cancelled = true;
+                            return true;
                         }
                     }
-                }
-                catch
-                {
-                    GenerateItems();
                 }
             }
 
@@ -539,7 +551,40 @@ namespace Oxide.Plugins
 
             return null;
         }
-        private bool CanBulkCraft(BasePlayer crafter)
+        private List<int> GetStacks(int amount, int maxStack)
+        {
+            var stacks = new List<int>();
+            while (amount > maxStack && amount > 0)
+            {
+                amount -= maxStack;
+                stacks.Add(maxStack);
+            }
+            if (amount > 0)
+            {
+                stacks.Add(amount);
+            }
+            return stacks;
+        }
+        private bool HasPlace(BasePlayer crafter, List<int> stacks)
+        {
+            if (!config.settings.craftingDetails.slots)
+            {
+                return true;
+            }
+            var capacity = crafter.inventory.containerMain.capacity + crafter.inventory.containerBelt.capacity;
+            var taken = crafter.inventory.containerMain.itemList.Count + crafter.inventory.containerBelt.itemList.Count;
+            var slots = capacity - taken;
+            if (slots - stacks.Count < 0)
+            {
+                return false;
+            }
+            return slots > 0;
+        }
+        private bool CanInstantCraftNoLevelRequirement(BasePlayer crafter)
+        {
+            return config.settings.craftingDetails.noLevelRequirement && permission.UserHasPermission(crafter.UserIDString, config.settings.craftingDetails.Permission);
+        }
+        private bool CanInstantCraft(BasePlayer crafter)
         {
             if (config.settings.craftingDetails.usePermission)
             {
@@ -547,10 +592,23 @@ namespace Oxide.Plugins
             }
             return true;
         }
-        private object OnItemCraftFinished(ItemCraftTask task, Item item)
+        private void ReturnCraft(ItemCraftTask task, BasePlayer crafter)
         {
-            var crafter = task.owner;
+            task.cancelled = true;
+            Message(crafter, "NoSlots");
+            foreach (var item in task.takenItems)
+            {
+                if (item.amount > 0)
+                    crafter.GiveItem(item);
+            }
+        }
+        private object OnItemCraftFinished(ItemCraftTask task, Item item, ItemCrafter craft)
+        {
+            if (task == null) return null;
+            var crafter = craft?.owner;
             if (crafter == null || !hasRights(crafter.UserIDString)) return null;
+            var bypassLevelRequirement = CanInstantCraftNoLevelRequirement(crafter);
+            if (!bypassLevelRequirement && !IsSkillEnabled(Skills.CRAFTING)) return null;
             var pi = GetPlayerInfo(crafter);
             var xpPercentBefore = getExperiencePercent(pi, Skills.CRAFTING);
             if (task.blueprint == null)
@@ -562,14 +620,8 @@ namespace Oxide.Plugins
             if (experienceGain == 0)
                 return null;
 
-            double Level = 0;
-            double Points = 0;
-            try
-            {
-                Level = getLevel(pi, Skills.CRAFTING);
-                Points = getPoints(pi, Skills.CRAFTING);
-            }
-            catch { }
+            double Level = pi.CRAFTING_LEVEL;
+            double Points = pi.CRAFTING_POINTS;
             Points += experienceGain * config.settings.craftingDetails.xp;
             if (Points >= getLevelPoints(Level + 1))
             {
@@ -579,7 +631,7 @@ namespace Oxide.Plugins
                 {
                     Level = getPointsLevel(Points, Skills.CRAFTING);
                     string format = $"<color={config.settings.colors.CRAFTING}>{_("LevelUpText", crafter.UserIDString)}</color>";
-                    string message = string.Format(format, _("CRAFTINGSkill", crafter.UserIDString), Level, Points, getLevelPoints(Level + 1), getLevel(pi, Skills.CRAFTING) * Convert.ToDouble(config.settings.craftingDetails.percent));
+                    string message = string.Format(format, _("CRAFTINGSkill", crafter.UserIDString), Level, Points, getLevelPoints(Level + 1), pi.CRAFTING_LEVEL * Convert.ToDouble(config.settings.craftingDetails.percent));
                     Player.Message(crafter, message, string.IsNullOrEmpty(config.generic.pluginPrefix) ? string.Empty : config.generic.pluginPrefix, config.generic.steamIDIcon);
                     GiveReward(crafter, Skills.CRAFTING, Level);
                     if (config.generic.enableLevelupBroadcast)
@@ -620,7 +672,6 @@ namespace Oxide.Plugins
             }
             return null;
         }
-
 
         #endregion Serverhooks
 
@@ -784,7 +835,7 @@ namespace Oxide.Plugins
                 user.Reply(_("RESET USE", user.Id));
                 return;
             }
-            data = new StoredData();
+            WipeData();
             SaveData();
             foreach (var player in BasePlayer.activePlayerList)
             {
@@ -792,6 +843,7 @@ namespace Oxide.Plugins
                 CreateGUI(player, GetPlayerInfo(player));
             }
             user.Reply("Userdata was successfully reset to zero");
+            Puts("{0} ({1}) reset userdata to zero", user.Name, user.Id);
         }
 
         private void ZlvlCommand(IPlayer user, string command, string[] args)
@@ -956,6 +1008,12 @@ namespace Oxide.Plugins
         private int Clean()
         {
             int count = 0;
+
+            if (data == null)
+            {
+                return count;
+            }
+
             var pi = CreatePlayerInfo();
 
             foreach (var info in data.PlayerInfo.ToList())
@@ -989,9 +1047,10 @@ namespace Oxide.Plugins
                 return;
             }
 
-            config.generic.penaltyOnDeath = !config.generic.penaltyOnDeath;
+            if (args.Length == 0) config.generic.penaltyOnDeath = !config.generic.penaltyOnDeath;
+            else config.generic.penaltyOnSuicide = !config.generic.penaltyOnSuicide;
 
-            if (config.generic.penaltyOnDeath)
+            if (config.generic.penaltyOnDeath || config.generic.penaltyOnSuicide)
             {
                 Subscribe(nameof(OnEntityDeath));
                 user.Reply("Penalty is now enabled.");
@@ -1127,6 +1186,7 @@ namespace Oxide.Plugins
 
         private void RegisterPermissions()
         {
+            permission.RegisterPermission(config.generic.vip, this);
             permission.RegisterPermission(config.generic.permissionName, this);
             permission.RegisterPermission(config.generic.permissionNameXP, this);
             permission.RegisterPermission(config.generic.AllowChainsawGather, this);
@@ -1149,7 +1209,7 @@ namespace Oxide.Plugins
 
         private void Subscribe()
         {
-            if (config.generic.penaltyOnDeath)
+            if (config.generic.penaltyOnDeath || config.generic.penaltyOnSuicide)
             {
                 Subscribe(nameof(OnEntityDeath));
             }
@@ -1170,7 +1230,7 @@ namespace Oxide.Plugins
                 Subscribe(nameof(OnDispenserGather));
             }
 
-            if (CraftingController == null && IsSkillEnabled(Skills.CRAFTING))
+            if (IsCraftingEnabled())
             {
                 Subscribe(nameof(OnItemCraft));
                 Subscribe(nameof(OnItemCraftFinished));
@@ -1231,9 +1291,21 @@ namespace Oxide.Plugins
             }
         }
 
-        private void SaveData() => Interface.Oxide.DataFileSystem.WriteObject(Name, data);
+        private void SaveData()
+        {
+            if (data != null)
+            {
+                Interface.Oxide.DataFileSystem.WriteObject(Name, data);
+            }
+        }
 
-        private void SaveDetails() => Interface.Oxide.DataFileSystem.WriteObject("ZLevelsCraftDetails", _craftData);
+        private void SaveDetails()
+        {
+            if (_craftData != null)
+            {
+                Interface.Oxide.DataFileSystem.WriteObject("ZLevelsCraftDetails", _craftData);
+            }
+        }
 
         private void LoadData()
         {
@@ -1241,9 +1313,10 @@ namespace Oxide.Plugins
             {
                 _craftData = Interface.Oxide.DataFileSystem.ReadObject<CraftData>("ZLevelsCraftDetails");
             }
-            catch
+            catch (Exception ex)
             {
-
+                Puts("CraftData threw an exception!");
+                UnityEngine.Debug.LogException(ex);
             }
 
             if (_craftData == null)
@@ -1267,14 +1340,39 @@ namespace Oxide.Plugins
             {
                 data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
             }
-            catch
+            catch (Exception ex)
             {
-
+                Puts("StoredData threw an exception!");
+                UnityEngine.Debug.LogException(ex);
             }
 
-            if (newSaveDetected || (data == null || data.PlayerInfo == null || data.PlayerInfo.Count == 0) || config.generic.wipeDataOnNewSave && BuildingManager.server.buildingDictionary.Count == 0)
+            if (data == null || data.PlayerInfo == null)
+            {
+                Puts("Data is null, resetting to defaults!");
+                data = new StoredData();
+            }
+
+            if (newSaveDetected)
+            {
+                Puts("Wiping data... new save detected");
+                WipeData();
+            }
+        }
+
+        private void WipeData()
+        {
+            if (string.IsNullOrEmpty(config.generic.vip))
             {
                 data = new StoredData();
+                return;
+            }
+            foreach (var pair in data.PlayerInfo.ToList())
+            {
+                if (permission.UserHasPermission(pair.Key.ToString(), config.generic.vip))
+                {
+                    continue;
+                }
+                data.PlayerInfo.Remove(pair.Key);
             }
         }
 
@@ -1374,7 +1472,7 @@ namespace Oxide.Plugins
             var points = $"{getPoints(pi, skill):0}";
             var level = skillMaxed ? "∞" : $"{getLevelPoints(getLevel(pi, skill) + 1):0}";
             var percent = $"{getExperiencePercent(pi, skill):0}%";
-            var penalty = $"{getPenaltyPercent(player, pi, skill):0}%";
+            var penalty = $"{getPenaltyPercent(player, pi, skill, false):0}%";
             return string.Format(format, skillName, xp, points, level, bonusText, percent, penalty);
         }
 
@@ -1405,9 +1503,9 @@ namespace Oxide.Plugins
             }
         }
 
-        private double GetPenalty(BasePlayer player, PlayerInfo pi, Skills skill)
+        private double GetPenalty(BasePlayer player, PlayerInfo pi, Skills skill, bool isSuicide)
         {
-            double penaltyPercent = getPenaltyPercent(player, pi, skill);
+            double penaltyPercent = getPenaltyPercent(player, pi, skill, isSuicide);
 
             switch (skill)
             {
@@ -1426,16 +1524,18 @@ namespace Oxide.Plugins
             return 0;
         }
 
-        private double getPenaltyPercent(BasePlayer player, PlayerInfo pi, Skills skill)
+        private double getPenaltyPercent(BasePlayer player, PlayerInfo pi, Skills skill, bool isSuicide)
         {
             var penaltyPercent = 0.0;
             var details = pi.LAST_DEATH;
             var currentTime = DateTime.UtcNow;
             var lastDeath = ToDateTimeFromEpoch(details);
             var timeAlive = currentTime - lastDeath;
-            if (timeAlive.TotalMinutes >= config.generic.penaltyMinutes)
+            if (timeAlive.TotalMinutes >= (isSuicide ? config.generic.penaltySuicideMinutes : config.generic.penaltyMinutes))
             {
-                var percent = config.settings.percentLostOnDeath.Get(skill);
+                var percent = isSuicide ? config.settings.percentLostOnSuicide.Get(skill) : config.settings.percentLostOnDeath.Get(skill);
+                if (percent == 0)
+                    return 0;
                 penaltyPercent = percent - (timeAlive.TotalHours * percent / 10.0);
                 if (penaltyPercent < 0)
                     penaltyPercent = 0;
@@ -1602,7 +1702,13 @@ namespace Oxide.Plugins
 
         private double getGathMult(double skillLevel, Skills skill)
         {
-            return Math.Round(config.settings.defaultMultipliers.Get(skill) + resourceMultipliersCurrent.Get(skill) * 0.1 * (skillLevel - 1), 2);
+            return Math.Round(config.settings.defaultMultipliers.Get(skill) + resourceMultipliersCurrent.Get(skill) * 0.1d * (skillLevel - 1.0), 2);
+        }
+
+        private bool IsCraftingEnabled()
+        {
+            if (CraftingController != null) return false;
+            return config.settings.levelCaps.Get(Skills.CRAFTING) != -1 || config.settings.craftingDetails.noLevelRequirement;
         }
 
         private bool IsSkillEnabled(Skills skill)
@@ -1736,7 +1842,7 @@ namespace Oxide.Plugins
                 }
             }
             var inactive = loaded - enabled;
-            Puts("Loaded " + loaded + " items. (Enabled: " + enabled + " | Inactive: " + inactive + ").");
+            Puts("Loaded {0} items (Enabled: {1} | Inactive: {2})", loaded, enabled, inactive);
             SaveDetails();
         }
         #endregion Helpers
@@ -1926,7 +2032,7 @@ namespace Oxide.Plugins
             return GetPlayerInfo(player.userID);
         }
 
-        private PlayerInfo CreatePlayerInfo() 
+        private PlayerInfo CreatePlayerInfo()
         {
             var pi = new PlayerInfo
             {
@@ -2075,14 +2181,23 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Penalty Minutes")]
             public int penaltyMinutes { get; set; } = 10;
 
+            [JsonProperty(PropertyName = "Penalty Minutes (Suicide)")]
+            public int penaltySuicideMinutes { get; set; } = 10;
+
             [JsonProperty(PropertyName = "Penalty On Death")]
             public bool penaltyOnDeath { get; set; } = true;
+
+            [JsonProperty(PropertyName = "Penalty On Suicide")]
+            public bool penaltyOnSuicide { get; set; }
 
             [JsonProperty(PropertyName = "Permission Name")]
             public string permissionName { get; set; } = "zlevelsremastered.use";
 
             [JsonProperty(PropertyName = "Permission Name XP")]
             public string permissionNameXP { get; set; } = "zlevelsremastered.noxploss";
+
+            [JsonProperty(PropertyName = "Permission Name No Wipes")]
+            public string vip { get; set; } = "zlevelsremastered.nowipes";
 
             [JsonProperty(PropertyName = "Player CUI Default Enabled")]
             public bool playerCuiDefaultEnabled { get; set; } = true;
@@ -2134,6 +2249,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Percent Lost On Death")]
             public ConfigurationResources percentLostOnDeath { get; set; } = new ConfigurationResources(50, 50, 50, 50, 50);
+
+            [JsonProperty(PropertyName = "Percent Lost On Suicide")]
+            public ConfigurationResources percentLostOnSuicide { get; set; } = new ConfigurationResources(0, 0, 0, 0, 0);
 
             [JsonProperty(PropertyName = "No Penalty Zones", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<string> zones { get; set; } = new List<string> { "adminzone1", "999999" };
@@ -2325,8 +2443,14 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Require Permission For Instant Bulk Craft")]
             public bool usePermission { get; set; }
 
+            [JsonProperty(PropertyName = "Instant Bulk Craft Permission Does Not Require Max Level")]
+            public bool noLevelRequirement { get; set; }
+
             [JsonProperty(PropertyName = "Permission For Instant Bulk Crafting At Max Level")]
             public string Permission { get; set; } = "zlevelsremastered.crafting.instantbulk";
+
+            [JsonProperty(PropertyName = "Require Inventory Slots")]
+            public bool slots;
 
             public ConfigurationCraftingDetails(double time, double xp, double percent)
             {
@@ -2603,6 +2727,7 @@ namespace Oxide.Plugins
                 {"SkillTreeXP", "You have received <color=#FFFF00>{0} XP</color> for leveling up!"},
                 {"ServerRewardPoints", "You have received <color=#FFFF00>{0} RP</color> for leveling up!"},
                 {"EconomicsDeposit", "You have received <color=#FFFF00>${0}</color> for leveling up!"},
+                {"NoSlots", "You don't have enough slots to craft!"},
             }, this);
         }
 
