@@ -9,14 +9,18 @@ using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
 /*
- * This update 2.9.3
+ * This update 2.9.3 ( version was switched to 3.0.0 for umod site version corrections )
  * Patched OnGrowableGathered
  * Added the new berry seeds to OnCollectiblePickup/config to support leveling.
+ * Resolved conflict issues with PrivateCrops by fixing this plugins hook return behaviour
+ *
+ * This update 3.0.1
+ * Added Separate Config Options for PowerTools support
  */
 
 namespace Oxide.Plugins
 {
-    [Info("ZLevelsRemastered", "Default", "3.0.0")]
+    [Info("ZLevelsRemastered", "Default", "3.0.1")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
 
     
@@ -77,7 +81,10 @@ namespace Oxide.Plugins
         Dictionary<string, object> levelCaps;
         Dictionary<string, object> pointsPerHit;
         Dictionary<string, object> pointsPerHitAtNight;
+        private Dictionary<string, object> pointsPerPowerToolAtNight;
         Dictionary<string, object> pointsPerHitCurrent;
+        private Dictionary<string, object> pointsPerHitPowerToolCurrent;
+        private Dictionary<string, object> pointsPerPowerTool;
         Dictionary<string, object> craftingDetails;
         Dictionary<string, object> percentLostOnDeath;
         Dictionary<string, object> colors;
@@ -169,8 +176,17 @@ namespace Oxide.Plugins
                 {Skills.WOODCUTTING, 30},
                 {Skills.MINING, 30},
                 {Skills.SKINNING, 30},
-                {Skills.ACQUIRE, 30}
+                {Skills.ACQUIRE, 30},
             });
+            pointsPerPowerTool = (Dictionary<string, object>)GetConfig("Settings", "PointsPerPowerTool", new Dictionary<string, object>{
+                {Skills.MINING, 30},
+                {Skills.WOODCUTTING, 30},
+            });
+            pointsPerPowerToolAtNight = (Dictionary<string, object>)GetConfig("NightBonus", "PointsPerPowerToolAtNight", new Dictionary<string, object>{
+                {Skills.WOODCUTTING, 60},
+                {Skills.MINING, 60},
+            });
+
             craftingDetails = (Dictionary<string, object>)GetConfig("Settings", "CraftingDetails", new Dictionary<string, object>{
                 { "TimeSpent", 1},
                 { "XPPerTimeSpent", 3},
@@ -269,7 +285,7 @@ namespace Oxide.Plugins
             initialized = false;
             try {
                 if ((int)levelCaps[Skills.CRAFTING] > 20)
-                levelCaps[Skills.CRAFTING] = 20;
+                    levelCaps[Skills.CRAFTING] = 20;
             }
             catch
             {
@@ -326,9 +342,11 @@ namespace Oxide.Plugins
                 SaveData();
             }
             pointsPerHitCurrent = pointsPerHit;
+            pointsPerHitPowerToolCurrent = pointsPerPowerTool;
             resourceMultipliersCurrent = resourceMultipliers;
             if (enableNightBonus && TOD_Sky.Instance.IsNight)
             {
+                pointsPerHitPowerToolCurrent = pointsPerPowerToolAtNight;
                 pointsPerHitCurrent = pointsPerHitAtNight;
                 resourceMultipliersCurrent = resourceMultipliersAtNight;
                 bonusOn = true;
@@ -557,9 +575,15 @@ namespace Oxide.Plugins
                 return;
             if (excludeJackhammerOnGather && player.GetHeldEntity() is Jackhammer || excludeChainsawOnGather && player.GetHeldEntity() is Chainsaw)
                 return;
-           if (IsSkillEnabled(Skills.WOODCUTTING) &&(int)dispenser.gatherType == 0) levelHandler(player, item, Skills.WOODCUTTING);
-            if (IsSkillEnabled(Skills.MINING) && (int)dispenser.gatherType == 1) levelHandler(player, item, Skills.MINING);
-            if (IsSkillEnabled(Skills.SKINNING) && (int)dispenser.gatherType == 2) levelHandler(player, item, Skills.SKINNING);
+            if (player.GetHeldEntity() is Jackhammer || player.GetHeldEntity() is Chainsaw)
+            {
+                if (IsSkillEnabled(Skills.WOODCUTTING) &&(int)dispenser.gatherType == 0) levelHandler(player, item, Skills.WOODCUTTING, true);
+                if (IsSkillEnabled(Skills.MINING) && (int)dispenser.gatherType == 1) levelHandler(player, item, Skills.MINING, true);
+                return;
+            }
+            if (IsSkillEnabled(Skills.WOODCUTTING) &&(int)dispenser.gatherType == 0) levelHandler(player, item, Skills.WOODCUTTING, false);
+            if (IsSkillEnabled(Skills.MINING) && (int)dispenser.gatherType == 1) levelHandler(player, item, Skills.MINING, false);
+            if (IsSkillEnabled(Skills.SKINNING) && (int)dispenser.gatherType == 2) levelHandler(player, item, Skills.SKINNING, false);
         }
                 
         void OnDispenserBonus(ResourceDispenser dispenser, BaseEntity entity, Item item) => OnDispenserGather(dispenser, entity, item);
@@ -572,7 +596,7 @@ namespace Oxide.Plugins
                 skillName = Skills.SKINNING;
             else
                 skillName = Skills.ACQUIRE;
-            levelHandler(player, item, skillName);
+            levelHandler(player, item, skillName, false);
             return null;
         }
                 
@@ -620,7 +644,7 @@ namespace Oxide.Plugins
                 skillName = Skills.ACQUIRE;
 
             if (!string.IsNullOrEmpty(skillName))
-                levelHandler(player, item, skillName);
+                levelHandler(player, item, skillName, false);
         }
         
         void OnTimeSunset()
@@ -628,6 +652,7 @@ namespace Oxide.Plugins
             if (!enableNightBonus || bonusOn) return;
             bonusOn = true;
             pointsPerHitCurrent = pointsPerHitAtNight;
+            pointsPerHitPowerToolCurrent = pointsPerPowerToolAtNight;
             resourceMultipliersCurrent = resourceMultipliersAtNight;
             if (broadcastEnabledBonus)
             {
@@ -643,6 +668,7 @@ namespace Oxide.Plugins
             if (!enableNightBonus || !bonusOn) return;
             bonusOn = false;
             pointsPerHitCurrent = pointsPerHit;
+            pointsPerHitPowerToolCurrent = pointsPerPowerTool;
             resourceMultipliersCurrent = resourceMultipliers;
             if (broadcastEnabledBonus)
             {
@@ -763,10 +789,9 @@ namespace Oxide.Plugins
             return null;
         }
 
-
         #endregion Serverhooks
 
-       #region Commands
+        #region Commands
 
         [HookMethod("SendHelpText"), ChatCommand("stathelp")]
         void SendHelpText(BasePlayer player)
@@ -1127,11 +1152,25 @@ namespace Oxide.Plugins
             messagesText += "<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>\n";
 
             messagesText += "<color=" + colors[Skills.MINING] + ">Mining</color>" + (IsSkillDisabled(Skills.MINING) ? "(DISABLED)" : "") + "\n";
-            messagesText += "XP per hit: <color=" + colors[Skills.MINING] + ">" + ((int)pointsPerHitCurrent[Skills.MINING] * (xpMultiplier / 100f)) + "</color>\n";
+            if (player.GetHeldEntity() is Jackhammer)
+            {
+                messagesText += "XP per hit: <color=" + colors[Skills.MINING] + ">" + ((int)pointsPerHitPowerToolCurrent[Skills.MINING] * (xpMultiplier / 100f)) + "</color>\n";
+            }
+            else
+            {
+                messagesText += "XP per hit: <color=" + colors[Skills.MINING] + ">" + ((int)pointsPerHitCurrent[Skills.MINING] * (xpMultiplier / 100f)) + "</color>\n";
+            }
             messagesText += "Bonus materials per level: <color=" + colors[Skills.MINING] + ">" + ((getGathMult(2, Skills.MINING) - 1) * 100).ToString("0.##") + "%</color>\n";
 
             messagesText += "<color=" + colors[Skills.WOODCUTTING] + ">Woodcutting</color>" + (IsSkillDisabled(Skills.WOODCUTTING) ? "(DISABLED)" : "") + "\n";
-            messagesText += "XP per hit: <color=" + colors[Skills.WOODCUTTING] + ">" + ((int)pointsPerHitCurrent[Skills.WOODCUTTING] * (xpMultiplier / 100f)) + "</color>\n";
+            if (player.GetHeldEntity() is Chainsaw)
+            {
+                messagesText += "XP per hit: <color=" + colors[Skills.WOODCUTTING] + ">" + ((int)pointsPerHitPowerToolCurrent[Skills.WOODCUTTING] * (xpMultiplier / 100f)) + "</color>\n";
+            }
+            else
+            {
+                messagesText += "XP per hit: <color=" + colors[Skills.WOODCUTTING] + ">" + ((int)pointsPerHitCurrent[Skills.WOODCUTTING] * (xpMultiplier / 100f)) + "</color>\n";
+            }
             messagesText += "Bonus materials per level: <color=" + colors[Skills.WOODCUTTING] + ">" + ((getGathMult(2, Skills.WOODCUTTING) - 1) * 100).ToString("0.##") + "%</color>\n";
 
             messagesText += "<color=" + colors[Skills.SKINNING] + '>' + "Skinning" + "</color>" + (IsSkillDisabled(Skills.SKINNING) ? "(DISABLED)" : "") + "\n";
@@ -1332,13 +1371,61 @@ namespace Oxide.Plugins
             return penaltyPercent;
         }
 
-        void levelHandler(BasePlayer player, Item item, string skill)
+        void levelHandler(BasePlayer player, Item item, string skill, bool powerTool)
         {
             var xpPercentBefore = getExperiencePercent(player, skill);
             var Level = getLevel(player.userID, skill);
             var Points = getPoints(player.userID, skill);
             item.amount = Mathf.CeilToInt((float)(item.amount * getGathMult(Level, skill)));
             var pointsToGet = (int)pointsPerHitCurrent[skill];
+            var pointsToGetPowerTool = (int)pointsPerHitPowerToolCurrent[skill];
+            var xpMultiplier = Convert.ToInt64(playerPrefs.PlayerInfo[player.userID].XPM);
+            if (powerTool == true)
+            {
+                Points += Convert.ToInt64(pointsToGetPowerTool * (xpMultiplier / 100f));
+            }
+            else
+            {
+                Points += Convert.ToInt64(pointsToGet * (xpMultiplier / 100f));
+            }
+            getPointsLevel(Points, skill);
+            try
+            {
+                if (Points >= getLevelPoints(Level + 1))
+                {
+                    var maxLevel = (int)levelCaps[skill] > 0 && Level + 1 > (int)levelCaps[skill];
+                    if (!maxLevel)
+                    {
+                        Level = getPointsLevel(Points, skill);
+                        PrintToChat(player, string.Format("<color=" + colors[skill] + '>' + msg("LevelUpText", player.UserIDString) + "</color>", msg(skill + "Skill", player.UserIDString), Level, Points, getLevelPoints(Level + 1), ((getGathMult(Level, skill) - 1) * 100).ToString("0.##")));
+						if (enableLevelupBroadcast)
+						{
+						    if (!levelAnnounce.Contains(Level))
+						        return;
+							foreach (var target in BasePlayer.activePlayerList.Where(x => x.userID != player.userID))
+							{
+								if (hasRights(target.UserIDString) && playerPrefs.PlayerInfo[target.userID].ONOFF)
+									PrintToChat(target, string.Format(msg("LevelUpTextBroadcast", target.UserIDString), player.displayName, Level, colors[skill], msg(skill + "Skill", target.UserIDString)));
+							}
+						}
+                    }
+                }
+            } catch {}
+            setPointsAndLevel(player.userID, skill, Points, Level);
+            var xpPercentAfter = getExperiencePercent(player, skill);
+            if (!xpPercentAfter.Equals(xpPercentBefore))
+				GUIUpdateSkill(player, skill);
+		}
+
+        //Specifically designed to handle fishing, as the fish come from the fishing plugin
+        void fishingHandler(BasePlayer player, int fish)
+        {
+            var skill = "FH";
+            var baseExpPerFish = 100f; //baseFishExp;
+            var xpPercentBefore = getExperiencePercent(player, skill);
+            var Level = getLevel(player.userID, skill);
+            var Points = getPoints(player.userID, skill);
+            var pointsToGet = fish * baseExpPerFish;
             var xpMultiplier = Convert.ToInt64(playerPrefs.PlayerInfo[player.userID].XPM);
             Points += Convert.ToInt64(pointsToGet * (xpMultiplier / 100f));
             getPointsLevel(Points, skill);
@@ -1350,35 +1437,19 @@ namespace Oxide.Plugins
                     if (!maxLevel)
                     {
                         Level = getPointsLevel(Points, skill);
-                        Print(player, string.Format("<color=" + colors[skill] + '>' + msg("LevelUpText", player.UserIDString) + "</color>", msg(skill + "Skill", player.UserIDString), Level, Points, getLevelPoints(Level + 1), ((getGathMult(Level, skill) - 1) * 100).ToString("0.##")));
+                        PrintToChat(player, string.Format("<color=" + colors[skill] + '>' + msg("LevelUpText", player.UserIDString) + "</color>", msg(skill + "Skill", player.UserIDString), Level, Points, getLevelPoints(Level + 1), ((getGathMult(Level, skill) - 1) * 100).ToString("0.##")));
                         if (enableLevelupBroadcast)
                         {
-                            
                             foreach (var target in BasePlayer.activePlayerList.Where(x => x.userID != player.userID))
                             {
-                                if (levelAnnounce.Contains(Level))
-                                    continue;
-
                                 if (hasRights(target.UserIDString) && playerPrefs.PlayerInfo[target.userID].ONOFF)
-                                    Print(target, string.Format(msg("LevelUpTextBroadcast", target.UserIDString), player.displayName, Level, colors[skill], msg(skill + "Skill", target.UserIDString)));
+                                    PrintToChat(target, string.Format(msg("LevelUpTextBroadcast", target.UserIDString), player.displayName, Level, colors[skill], msg(skill + "Skill", target.UserIDString)));
                             }
-                        }
-                        else
-                        {
-                            setPointsAndLevel(player.userID, skill, Points, Level);
-                            var xpPercentAfter1 = getExperiencePercent(player, skill);
-                            if (!xpPercentAfter1.Equals(xpPercentBefore))
-                                GUIUpdateSkill(player, skill);
-                            return;
                         }
                     }
                 }
             }
-            catch
-            {
-                // ignored
-            }
-
+            catch { }
             setPointsAndLevel(player.userID, skill, Points, Level);
             var xpPercentAfter = getExperiencePercent(player, skill);
             if (!xpPercentAfter.Equals(xpPercentBefore))
