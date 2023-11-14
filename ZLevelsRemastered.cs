@@ -12,9 +12,13 @@ using Rust;
 
 //nice nighttime only idea without ui https://umod.org/community/zlevels-remastered/43041-request-night-time-farming-bonus-plugin
 
+/*
+
+*/
+
 namespace Oxide.Plugins
 {
-    [Info("ZLevels Remastered", "nivex", "3.1.3")]
+    [Info("ZLevels Remastered", "nivex", "3.1.4")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
 
     class ZLevelsRemastered : RustPlugin
@@ -23,9 +27,13 @@ namespace Oxide.Plugins
         Plugin EventManager, CraftingController, ZoneManager, Economics, IQEconomic, ServerRewards, SkillTree;
 
         private StoredData data = new StoredData();
+        private Dictionary<string, ItemDefinition> CraftItems;
+        private CraftData _craftData = new CraftData();
         private StringBuilder _sb = new StringBuilder();
         private bool newSaveDetected;
         private bool bonusOn;
+        private int MaxB = 10001;
+        private int MinB = 10;
 
         public enum Skills
         {
@@ -38,6 +46,19 @@ namespace Oxide.Plugins
         }
 
         private Skills[] AllSkills = new Skills[] { Skills.ACQUIRE, Skills.CRAFTING, Skills.MINING, Skills.SKINNING, Skills.WOODCUTTING };
+
+        private class CraftData
+        {
+            public Dictionary<string, CraftInfo> CraftList = new Dictionary<string, CraftInfo>();
+        }
+
+        private class CraftInfo
+        {
+            public int MaxBulkCraft;
+            public int MinBulkCraft;
+            public string shortName;
+            public bool Enabled;
+        }
 
         private class StoredData
         {
@@ -150,8 +171,13 @@ namespace Oxide.Plugins
                 permission.RegisterPermission(config.generic.BlockWeaponsGather, this);
             }
 
+            if (!permission.PermissionExists(config.settings.craftingDetails.Permission))
+            {
+                permission.RegisterPermission(config.settings.craftingDetails.Permission, this);
+            }
+
             int index = 0;
-            
+
             foreach (Skills skill in AllSkills)
             {
                 if (IsSkillEnabled(skill))
@@ -278,7 +304,7 @@ namespace Oxide.Plugins
                 Message(player, "PenaltyText", _sb.ToString());
             }
 
-            data.PlayerInfo[player.userID].LAST_DEATH = ToEpochTime(DateTime.UtcNow);
+            pi.LAST_DEATH = ToEpochTime(DateTime.UtcNow);
         }
 
         private void OnDispenserGather(ResourceDispenser dispenser, BasePlayer player, Item item)
@@ -294,9 +320,9 @@ namespace Oxide.Plugins
             {
                 return;
             }
-            
+
             Item activeItem = player.GetActiveItem();
-            
+
             if (permission.UserHasPermission(player.UserIDString, config.generic.BlockWeaponsGather) && activeItem?.info.category == ItemCategory.Weapon)
             {
                 return;
@@ -307,8 +333,9 @@ namespace Oxide.Plugins
             if (item.info.shortname == "stones" && !config.functions.stone) return;
             if (item.info.shortname == "metal.ore" && !config.functions.metal) return;
             if (item.info.shortname == "hq.metal.ore" && !config.functions.hqm) return;
-            
+
             int prevAmount = item.amount;
+            bool isPowerTool = false;
 
             if (dispenser.gatherType != ResourceDispenser.GatherType.Flesh && activeItem != null)
             {
@@ -316,48 +343,50 @@ namespace Oxide.Plugins
 
                 if (heldEntity is Jackhammer || heldEntity is Chainsaw)
                 {
-                    Skills skill = dispenser.gatherType == ResourceDispenser.GatherType.Tree ? Skills.WOODCUTTING : Skills.MINING;
+                    Skills skill = dispenser.gatherType == ResourceDispenser.GatherType.Tree ? Skills.WOODCUTTING : dispenser.gatherType == ResourceDispenser.GatherType.Ore ? Skills.MINING : Skills.SKINNING;
 
-                    if (skill == Skills.WOODCUTTING && (!IsSkillEnabled(Skills.WOODCUTTING) || !CanUseChainsaw(player)))
+                    if (skill == Skills.WOODCUTTING && !CanUseChainsaw(player))
                     {
                         return;
                     }
 
-                    if (skill == Skills.MINING && (!IsSkillEnabled(Skills.MINING) || !CanUseJackhammer(player)))
+                    if (skill == Skills.MINING && !CanUseJackhammer(player))
                     {
                         return;
                     }
 
-                    int amount = levelHandler(pi, player, item.amount, skill, dispenser.baseEntity, true);
+                    if (!config.functions.gibs && dispenser.GetComponent<ServerGib>() != null)
+                    {
+                        return;
+                    }
 
-                    if (!config.functions.gibs && dispenser.GetComponent<ServerGib>() != null) return;
-
-                    item.amount = amount;
+                    isPowerTool = true;
                 }
             }
-
+            
             if (IsSkillEnabled(Skills.WOODCUTTING) && dispenser.gatherType == ResourceDispenser.GatherType.Tree)
             {
-                item.amount = levelHandler(pi, player, item.amount, Skills.WOODCUTTING, dispenser.baseEntity);
+                item.amount = levelHandler(pi, player, item.amount, Skills.WOODCUTTING, dispenser.baseEntity, isPowerTool);
             }
-
-            if (IsSkillEnabled(Skills.MINING) && dispenser.gatherType == ResourceDispenser.GatherType.Ore)
+            else if (IsSkillEnabled(Skills.MINING) && dispenser.gatherType == ResourceDispenser.GatherType.Ore)
             {
-                int amount = levelHandler(pi, player, item.amount, Skills.MINING, dispenser.baseEntity);
+                int amount = levelHandler(pi, player, item.amount, Skills.MINING, dispenser.baseEntity, isPowerTool);
 
-                if (!config.functions.gibs && dispenser.GetComponent<ServerGib>() != null) return;
-
+                if (!config.functions.gibs && dispenser.GetComponent<ServerGib>() != null)
+                {
+                    return;
+                }
+                
                 item.amount = amount;
             }
-
-            if (IsSkillEnabled(Skills.SKINNING) && dispenser.gatherType == ResourceDispenser.GatherType.Flesh)
+            else if (IsSkillEnabled(Skills.SKINNING) && dispenser.gatherType == ResourceDispenser.GatherType.Flesh)
             {
-                item.amount = levelHandler(pi, player, item.amount, Skills.SKINNING, dispenser.baseEntity);
+                item.amount = levelHandler(pi, player, item.amount, Skills.SKINNING, dispenser.baseEntity, isPowerTool);
             }
 
             if (item.amount != prevAmount)
             {
-                Interface.CallHook("OnZLevelDispenserGather", dispenser, player, item, prevAmount, item.amount);
+                Interface.CallHook("OnZLevelDispenserGather", dispenser, player, item, prevAmount, item.amount, isPowerTool);
             }
         }
 
@@ -475,7 +504,7 @@ namespace Oxide.Plugins
             if (IsSkillEnabled(Skills.ACQUIRE))
                 skill = Skills.ACQUIRE;
             else skill = Skills.SKINNING;
-                        
+
             var prevAmount = item.amount;
 
             item.amount = levelHandler(pi, player, item.amount, skill, plant);
@@ -500,12 +529,56 @@ namespace Oxide.Plugins
             craftingTime -= amountToReduce;
             if (craftingTime < 0)
                 craftingTime = 0;
+            if (craftingTime == 0 && CanBulkCraft(crafter))
+            {
+                try
+                {
+                    foreach (var entry in _craftData.CraftList)
+                    {
+                        var itemname = task.blueprint.targetItem.shortname;
+                        if (entry.Value.shortName == itemname && entry.Value.Enabled)
+                        {
+                            var amount = task.amount;
+                            if (amount >= entry.Value.MinBulkCraft && amount <= entry.Value.MaxBulkCraft && amount > 0)
+                            {
+                                /*
+                                var item = GetItem(itemname);
+                                var final_amount = task.blueprint.amountToCreate * amount;
+                                var newItem = ItemManager.CreateByItemID(item.itemid, final_amount);
+                                crafter.inventory.GiveItem(newItem);
+                                */
+                                int amountToCreate = task.blueprint.amountToCreate;
+                                task.blueprint.amountToCreate *= amount;
+                                crafter.inventory.crafting.FinishCrafting(task);
+                                task.blueprint.amountToCreate = amountToCreate;
+                                return false;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    GenerateItems();
+                }
+            }
+
             if (!task.blueprint.name.Contains("(Clone)"))
                 task.blueprint = UnityEngine.Object.Instantiate(task.blueprint);
             task.blueprint.time = craftingTime;
             return null;
         }
-
+        private bool CanBulkCraft(BasePlayer crafter)
+        {
+            if (config.settings.craftingDetails.usePermission)
+            {
+                return permission.UserHasPermission(crafter.UserIDString, config.settings.craftingDetails.Permission);
+            }
+            return true;
+        }
+        private string f(double d)
+        {
+            return $"{d:N02}";
+        }
         private object OnItemCraftFinished(ItemCraftTask task, Item item)
         {
             var crafter = task.owner;
@@ -538,15 +611,16 @@ namespace Oxide.Plugins
                 {
                     Level = getPointsLevel(Points, Skills.CRAFTING);
                     string format = $"<color={config.settings.colors.CRAFTING}>{_("LevelUpText", crafter.UserIDString)}</color>";
-                    string message = string.Format(format, _("CRAFTINGSkill", crafter.UserIDString), Level, Points, getLevelPoints(Level + 1), getLevel(pi, Skills.CRAFTING) * Convert.ToDouble(config.settings.craftingDetails.percent));
+                    string message = string.Format(format, _("CRAFTINGSkill", crafter.UserIDString), f(Level), f(Points), f(getLevelPoints(Level + 1)), f(getLevel(pi, Skills.CRAFTING) * Convert.ToDouble(config.settings.craftingDetails.percent)));
                     Player.Message(crafter, message, string.IsNullOrEmpty(config.generic.pluginPrefix) ? string.Empty : config.generic.pluginPrefix, config.generic.steamIDIcon);
+                    GiveReward(crafter, Skills.CRAFTING, Level);
                     if (config.generic.enableLevelupBroadcast)
                     {
                         foreach (var target in BasePlayer.activePlayerList)
                         {
-                            if (target.userID != crafter.userID && hasRights(target.UserIDString) && data.PlayerInfo[target.userID].ENABLED)
+                            if (target != null && target.userID != crafter.userID && hasRights(target.UserIDString) && GetPlayerInfo(target).ENABLED)
                             {
-                                Message(target, "LevelUpTextBroadcast", crafter.displayName, Level, config.settings.colors.CRAFTING, _("CRAFTINGSkill", crafter.UserIDString));
+                                Message(target, "LevelUpTextBroadcast", crafter.displayName, f(Level), config.settings.colors.CRAFTING, _("CRAFTINGSkill", crafter.UserIDString));
                             }
                         }
                     }
@@ -555,7 +629,7 @@ namespace Oxide.Plugins
             try
             {
                 if (item.info.shortname != "lantern_a" && item.info.shortname != "lantern_b")
-                    setPointsAndLevel(GetPlayerInfo(crafter), Skills.CRAFTING, Points, Level);
+                    setPointsAndLevel(pi, Skills.CRAFTING, Points, Level);
             }
             catch { }
 
@@ -610,7 +684,7 @@ namespace Oxide.Plugins
                 foreach (var currSkill in AllSkills)
                 {
                     if (!IsSkillEnabled(currSkill)) continue;
-                    _sb.Append($" {currSkill} > {pointsPerHitCurrent.Get(currSkill)} |");
+                    _sb.Append($" {currSkill} > {f(pointsPerHitCurrent.Get(currSkill))} |");
                 }
                 user.Reply(_sb.ToString().TrimEnd('|'));
                 return;
@@ -629,6 +703,7 @@ namespace Oxide.Plugins
             else if (skillName.Equals("WC")) skill = Skills.WOODCUTTING;
             else if (skillName.Equals("M")) skill = Skills.MINING;
             else if (skillName.Equals("A")) skill = Skills.ACQUIRE;
+            else if (skillName.Equals("S")) skill = Skills.SKINNING;
             else { user.Reply("Incorrect skill. Possible skills are: WC, M, S, A, C, *(All skills)."); return; }
 
             if (skill == Skills.ALL)
@@ -643,7 +718,7 @@ namespace Oxide.Plugins
                 foreach (var currSkill in AllSkills)
                 {
                     if (!IsSkillEnabled(currSkill)) continue;
-                    _sb.Append($" {currSkill} > {pointsPerHitCurrent.Get(currSkill)} |");
+                    _sb.Append($" {currSkill} > {f(pointsPerHitCurrent.Get(currSkill))} |");
                 }
                 user.Reply(_sb.ToString().TrimEnd('|'));
             }
@@ -655,7 +730,7 @@ namespace Oxide.Plugins
                 foreach (var currSkill in AllSkills)
                 {
                     if (!IsSkillEnabled(currSkill)) continue;
-                    _sb.Append($" {currSkill} > {pointsPerHitCurrent.Get(currSkill)} |");
+                    _sb.Append($" {currSkill} > {f(pointsPerHitCurrent.Get(currSkill))} |");
                 }
                 user.Reply(_sb.ToString().TrimEnd('|'));
             }
@@ -684,7 +759,7 @@ namespace Oxide.Plugins
             }
             if (args.Length < 2)
             {
-                user.Reply($"Current XP multiplier for player '{target.Name}' is {playerData.XP_MULTIPLIER}%");
+                user.Reply($"Current XP multiplier for player '{target.Name}' is {f(playerData.XP_MULTIPLIER)}%");
                 return;
             }
             double multiplier = -1;
@@ -697,7 +772,7 @@ namespace Oxide.Plugins
                 }
             }
             playerData.XP_MULTIPLIER = multiplier;
-            user.Reply($"New XP multiplier for player '{target.Name}' is {playerData.XP_MULTIPLIER}%");
+            user.Reply($"New XP multiplier for player '{target.Name}' is {f(playerData.XP_MULTIPLIER)}%");
         }
 
         private void InfoCommand(IPlayer user, string command, string[] args)
@@ -724,12 +799,12 @@ namespace Oxide.Plugins
             textTable.AddColumn("FieldInfo");
             textTable.AddColumn("Level");
             textTable.AddColumn("Points");
-            textTable.AddRow(new string[] { _("ACQUIRESkill", target.Id), playerData.ACQUIRE_LEVEL.ToString(), playerData.ACQUIRE_POINTS.ToString() });
-            textTable.AddRow(new string[] { _("CRAFTINGSkill", target.Id), playerData.CRAFTING_LEVEL.ToString(), playerData.CRAFTING_POINTS.ToString() });
-            textTable.AddRow(new string[] { _("MININGSkill", target.Id), playerData.MINING_LEVEL.ToString(), playerData.MINING_POINTS.ToString() });
-            textTable.AddRow(new string[] { _("SKINNINGSkill", target.Id), playerData.SKINNING_LEVEL.ToString(), playerData.SKINNING_POINTS.ToString() });
-            textTable.AddRow(new string[] { _("WOODCUTTINGSkill", target.Id), playerData.WOODCUTTING_LEVEL.ToString(), playerData.WOODCUTTING_POINTS.ToString() });
-            textTable.AddRow(new string[] { _("XPM", target.Id), playerData.XP_MULTIPLIER.ToString() + "%", string.Empty });
+            textTable.AddRow(new string[] { _("ACQUIRESkill", target.Id), f(playerData.ACQUIRE_LEVEL), f(playerData.ACQUIRE_POINTS) });
+            textTable.AddRow(new string[] { _("CRAFTINGSkill", target.Id), f(playerData.CRAFTING_LEVEL), f(playerData.CRAFTING_POINTS) });
+            textTable.AddRow(new string[] { _("MININGSkill", target.Id), f(playerData.MINING_LEVEL), f(playerData.MINING_POINTS) });
+            textTable.AddRow(new string[] { _("SKINNINGSkill", target.Id), f(playerData.SKINNING_LEVEL), f(playerData.SKINNING_POINTS) });
+            textTable.AddRow(new string[] { _("WOODCUTTINGSkill", target.Id), f(playerData.WOODCUTTING_LEVEL), f(playerData.WOODCUTTING_POINTS) });
+            textTable.AddRow(new string[] { _("XPM", target.Id), f(playerData.XP_MULTIPLIER) + "%", string.Empty });
             user.Reply($"\n{_("STATS", target.Id)}{target.Name}\n{textTable}");
         }
 
@@ -952,7 +1027,7 @@ namespace Oxide.Plugins
             _sb.Clear();
             _sb.AppendLine("<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>");
             foreach (Skills skill in AllSkills) _sb.Append(getStatPrint(player, skill));
-            var pi = data.PlayerInfo[player.userID];
+            var pi = GetPlayerInfo(player.userID);
             var alive = ReadableTimeSpan(DateTime.UtcNow - ToDateTimeFromEpoch(pi.LAST_DEATH));
             _sb.AppendLine().AppendLine($"Time alive: {alive}");
             _sb.AppendLine($"XP rates for you are {pi.XP_MULTIPLIER}%");
@@ -971,12 +1046,12 @@ namespace Oxide.Plugins
             _sb.Clear();
             var colors = config.settings.colors;
             var craftingDetails = config.settings.craftingDetails;
-            var xpm = data.PlayerInfo[player.userID].XP_MULTIPLIER / 100f;
+            var xpm = GetPlayerInfo(player.userID).XP_MULTIPLIER / 100f;
             var m = player.GetHeldEntity() is Jackhammer ? pointsPerHitPowerToolCurrent.Get(Skills.MINING) : pointsPerHitCurrent.Get(Skills.MINING);
             var wc = player.GetHeldEntity() is Chainsaw ? pointsPerHitPowerToolCurrent.Get(Skills.WOODCUTTING) : pointsPerHitCurrent.Get(Skills.WOODCUTTING);
 
             _sb.AppendLine("<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>");
-            
+
             AppendLine(colors.ACQUIRE, pointsPerHitCurrent.Get(Skills.ACQUIRE) * xpm, Skills.ACQUIRE);
             AppendLine(colors.MINING, m * xpm, Skills.MINING);
             AppendLine(colors.SKINNING, pointsPerHitCurrent.Get(Skills.SKINNING) * xpm, Skills.SKINNING);
@@ -1118,15 +1193,35 @@ namespace Oxide.Plugins
 
             if (updated)
             {
-                Config["Functions", "CollectibleEntitys"] = config.functions.enabledCollectibleEntity;
-                Config.Save();
+                SaveConfig();
             }
         }
 
         private void SaveData() => Interface.Oxide.DataFileSystem.WriteObject(Name, data);
 
+        private void SaveDetails() => Interface.Oxide.DataFileSystem.WriteObject("ZLevelsCraftDetails", _craftData);
+
         private void LoadData()
         {
+            try
+            {
+                _craftData = Interface.Oxide.DataFileSystem.ReadObject<CraftData>("ZLevelsCraftDetails");
+            }
+            catch
+            {
+
+            }
+
+            if (_craftData == null)
+            {
+                _craftData = new CraftData();
+            }
+
+            if (_craftData.CraftList.Count == 0)
+            {
+                GenerateItems(true);
+            }
+
             CheckCollectible();
 
             try
@@ -1190,7 +1285,7 @@ namespace Oxide.Plugins
                     setPointsAndLevel(pi, currSkill, getLevelPoints(modifiedLevel), modifiedLevel);
                     var basePlayer = BasePlayer.FindByID(id);
                     if (basePlayer != null) CreateGUI(basePlayer, GetPlayerInfo(basePlayer));
-                    _sb.Append($"({_(currSkill + "Skill")} > {modifiedLevel}) ");
+                    _sb.Append($"({_(currSkill + "Skill")} > {f(modifiedLevel)}) ");
                 }
                 user.Reply($"\nChanges for '{target.Name}': " + _sb.ToString().TrimEnd());
             }
@@ -1211,11 +1306,11 @@ namespace Oxide.Plugins
                 if (modifiedLevel > levelCap && levelCap != 0)
                 {
                     modifiedLevel = levelCap;
-                }                
+                }
                 setPointsAndLevel(pi, skill, getLevelPoints(modifiedLevel), modifiedLevel);
                 var basePlayer = BasePlayer.FindByID(id);
                 if (basePlayer != null) GUIUpdateSkill(basePlayer, skill);
-                user.Reply($"{_(skill + "Skill")} Lvl for [{target.Name}] set to: [{modifiedLevel}]");
+                user.Reply($"{_(skill + "Skill")} Lvl for [{target.Name}] set to: [{f(modifiedLevel)}]");
             }
         }
 
@@ -1230,20 +1325,20 @@ namespace Oxide.Plugins
 
             string bonusText;
             if (skill == Skills.CRAFTING)
-                bonusText = (getLevel(pi, skill) * config.settings.craftingDetails.percent).ToString("0.##");
+                bonusText = f(getLevel(pi, skill) * config.settings.craftingDetails.percent);
             else
-                bonusText = ((getGathMult(getLevel(pi, skill), skill) - 1) * 100).ToString("0.##");
+                bonusText = f(((getGathMult(getLevel(pi, skill), skill) - 1) * 100));
 
             string format = $"<color={config.settings.colors.Get(skill)}>{_("StatsText", player.UserIDString)}</color>\n";
-            
+
             return string.Format(format,
                 _(skill + "Skill", player.UserIDString),
-                getLevel(pi, skill) + (levelCap > 0 ? ("/" + levelCap) : string.Empty),
-                getPoints(pi, skill),
-                skillMaxed ? "∞" : getLevelPoints(getLevel(pi, skill) + 1).ToString(),
+                f(getLevel(pi, skill)) + (levelCap > 0 ? ("/" + levelCap) : string.Empty),
+                f(getPoints(pi, skill)),
+                skillMaxed ? "∞" : f(getLevelPoints(getLevel(pi, skill) + 1)),
                 bonusText,
-                getExperiencePercent(pi, skill) + "%",
-                getPenaltyPercent(player, pi, skill) + "%");
+                f(getExperiencePercent(pi, skill)) + "%",
+                f(getPenaltyPercent(player, pi, skill)) + "%");
         }
 
         private void removePoints(PlayerInfo pi, Skills skill, double points)
@@ -1317,20 +1412,16 @@ namespace Oxide.Plugins
 
             if (extCanGainZLevelXP is bool && !(bool)extCanGainZLevelXP)
             {
-                return -1;
+                return prevAmount;
             }
 
             var xpPercentBefore = getExperiencePercent(pi, skill);
             var Level = getLevel(pi, skill);
             var Points = getPoints(pi, skill);
-            var newAmount = prevAmount * getGathMult(Level, skill);
+            var newAmount = Mathf.CeilToInt(prevAmount * (float)getGathMult(Level, skill));
             var pointsToGet = isPowerTool ? pointsPerHitPowerToolCurrent.Get(skill) : pointsPerHitCurrent.Get(skill);
-            var xpMultiplier = pi.XP_MULTIPLIER;
+            Points += Convert.ToInt64(pointsToGet * (pi.XP_MULTIPLIER / 100f));
 
-            Points += Convert.ToInt64(pointsToGet * (xpMultiplier / 100f));
-
-            getPointsLevel(Points, skill);
-            
             if (Points >= getLevelPoints(Level + 1))
             {
                 var levelCap = config.settings.levelCaps.Get(skill);
@@ -1348,6 +1439,7 @@ namespace Oxide.Plugins
 
                     PrintToChat(player, string.Format(format, sm, Level, Points, lp, gm));
                     BroadcastLevel(player, skill, color, Level);
+                    GiveReward(player, skill, Level);
                 }
             }
 
@@ -1355,7 +1447,7 @@ namespace Oxide.Plugins
             var xpPercentAfter = getExperiencePercent(pi, skill);
             if (!Mathf.Approximately(xpPercentAfter, xpPercentBefore))
                 GUIUpdateSkill(player, skill);
-            return Mathf.CeilToInt(newAmount);
+            return newAmount;
         }
 
         private void BroadcastLevel(BasePlayer player, Skills skill, string color, double Level)
@@ -1458,14 +1550,14 @@ namespace Oxide.Plugins
             var c = -points;
             var x1 = (-b - Math.Sqrt(b * b - 4 * a * c)) / (2 * a);
             var levelCap = config.settings.levelCaps.Get(skill);
-            if (levelCap == 0 || -x1 <= levelCap)
-                return -x1;
+            if ((int)levelCap == 0 || (int)-x1 <= (int)levelCap)
+                return (int)-x1;
             return levelCap;
         }
 
-        private float getGathMult(double skillLevel, Skills skill)
+        private double getGathMult(double skillLevel, Skills skill)
         {
-            return (float)(config.settings.defaultMultipliers.Get(skill) + resourceMultipliersCurrent.Get(skill) * 0.1 * (skillLevel - 1));
+            return config.settings.defaultMultipliers.Get(skill) + resourceMultipliersCurrent.Get(skill) * 0.1 * (skillLevel - 1);
         }
 
         private bool IsSkillEnabled(Skills skill)
@@ -1545,6 +1637,68 @@ namespace Oxide.Plugins
             Player.Message(player, message, string.IsNullOrEmpty(config.generic.pluginPrefix) ? string.Empty : config.generic.pluginPrefix, config.generic.steamIDIcon);
         }
 
+        private ItemDefinition GetItem(string shortname)
+        {
+            if (string.IsNullOrEmpty(shortname) || CraftItems == null) return null;
+            ItemDefinition item;
+            if (CraftItems.TryGetValue(shortname, out item)) return item;
+            return null;
+        }
+
+        private void GenerateItems(bool reset = false)
+        {
+            if (!reset)
+            {
+                var config_protocol = config.generic.gameProtocol;
+
+                if (config_protocol != Protocol.network)
+                {
+                    config.generic.gameProtocol = Protocol.network;
+                    Config["Generic", "gameProtocol"] = config.generic.gameProtocol;
+                    Puts("Updating item list from protocol " + config_protocol + " to protocol " + config.generic.gameProtocol + ".");
+                    GenerateItems(true);
+                    SaveConfig();
+                    return;
+                }
+            }
+
+            if (reset)
+            {
+                Interface.Oxide.DataFileSystem.WriteObject("ZLevelsCraftDetails.old", _craftData);
+                _craftData.CraftList.Clear();
+                Puts("Generating new item list...");
+            }
+
+            CraftItems = ItemManager.GetItemDefinitions().ToDictionary(i => i.shortname);
+            int loaded = 0, enabled = 0;
+            foreach (var definition in CraftItems)
+            {
+                if (definition.Value.shortname.Length >= 1)
+                {
+                    CraftInfo p;
+                    if (_craftData.CraftList.TryGetValue(definition.Value.shortname, out p))
+                    {
+                        if (p.Enabled) { enabled++; }
+                        loaded++;
+                    }
+                    else
+                    {
+                        var z = new CraftInfo
+                        {
+                            shortName = definition.Value.shortname,
+                            MaxBulkCraft = MaxB,
+                            MinBulkCraft = MinB,
+                            Enabled = true
+                        };
+                        _craftData.CraftList.Add(definition.Value.shortname, z);
+                        loaded++;
+                    }
+                }
+            }
+            var inactive = loaded - enabled;
+            Puts("Loaded " + loaded + " items. (Enabled: " + enabled + " | Inactive: " + inactive + ").");
+            SaveDetails();
+        }
         #endregion Helpers
 
         #region CUI
@@ -1657,7 +1811,7 @@ namespace Oxide.Plugins
                     new CuiRectTransformComponent{ AnchorMin = "0.025 0", AnchorMax = $"0.5 1" }
                 }
             };
-            
+
             container.Add(lvText1);
 
             if (config.cui.cuiTextShadow)
@@ -1755,7 +1909,7 @@ namespace Oxide.Plugins
                     XP_MULTIPLIER = config.settings.stats.xpm
                 };
             }
-            
+
             return pi;
         }
 
@@ -1780,7 +1934,7 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Settings")]
             public ConfigurationSettings settings { get; set; } = new ConfigurationSettings();
 
-            [JsonProperty(PropertyName = "Rewards After Leveling Up (Reward * Level = Amount)")]
+            [JsonProperty(PropertyName = "Level Up Rewards (Reward * Level = Amount)")]
             public Rewards Rewards { get; set; } = new Rewards();
         }
 
@@ -1866,6 +2020,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Weapons On Gather Permission")]
             public string BlockWeaponsGather { get; set; } = "zlevelsremastered.weapons.blocked";
+
+            [JsonProperty(PropertyName = "gameProtocol")]
+            public int gameProtocol { get; set; } = Protocol.network;
 
             [JsonProperty(PropertyName = "Penalty Minutes")]
             public int penaltyMinutes { get; set; } = 10;
@@ -2111,6 +2268,12 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Percent Faster Per Level")]
             public double percent { get; set; }
 
+            [JsonProperty(PropertyName = "Require Permission For Instant Bulk Craft")]
+            public bool usePermission { get; set; }
+
+            [JsonProperty(PropertyName = "Permission For Instant Bulk Crafting At Max Level")]
+            public string Permission { get; set; } = "zlevelsremastered.crafting.instantbulk";
+
             public ConfigurationCraftingDetails(double time, double xp, double percent)
             {
                 this.time = time;
@@ -2118,7 +2281,7 @@ namespace Oxide.Plugins
                 this.percent = percent;
             }
         }
-        
+
         public class ConfigurationCuiPositions
         {
             [JsonProperty(PropertyName = "Width Left")]
@@ -2179,46 +2342,89 @@ namespace Oxide.Plugins
             }
         }
 
+        public class RewardType
+        {
+            [JsonProperty(PropertyName = "Acquire")]
+            public double Acquire { get; set; }
+
+            [JsonProperty(PropertyName = "Crafting")]
+            public double Crafting { get; set; }
+
+            [JsonProperty(PropertyName = "Mining")]
+            public double Mining { get; set; }
+
+            [JsonProperty(PropertyName = "Skinning")]
+            public double Skinning { get; set; }
+
+            [JsonProperty(PropertyName = "Woodcutting")]
+            public double Woodcutting { get; set; }
+
+            public double Get(Skills skill)
+            {
+                switch (skill)
+                {
+                    case Skills.ACQUIRE: return Acquire;
+                    case Skills.CRAFTING: return Crafting;
+                    case Skills.MINING: return Mining;
+                    case Skills.SKINNING: return Skinning;
+                    case Skills.WOODCUTTING: return Woodcutting;
+                    default: return 0.0;
+                }
+            }
+        }
+
         public class Rewards
         {
             [JsonProperty(PropertyName = "Economics Money")]
-            public double Money { get; set; }
+            public RewardType Money { get; set; } = new RewardType();
 
             [JsonProperty(PropertyName = "ServerRewards Points")]
-            public int Points { get; set; }
+            public RewardType Points { get; set; } = new RewardType();
 
             [JsonProperty(PropertyName = "SkillTree XP")]
-            public double XP { get; set; }
+            public RewardType XP { get; set; } = new RewardType();
         }
 
-        public void Give(BasePlayer player, int level)
+        public void GiveReward(BasePlayer player, Skills skill, double level)
         {
-            if (config.Rewards.Money > 0 && Economics != null && Economics.IsLoaded)
+            if (Economics != null && Economics.IsLoaded)
             {
-                var money = config.Rewards.Money * level;
-                Economics?.Call("Deposit", player.UserIDString, money);
-                Message(player, "EconomicsDeposit", money);
+                var money = config.Rewards.Money.Get(skill) * level;
+                if (money > 0)
+                {
+                    Economics?.Call("Deposit", player.UserIDString, money);
+                    Message(player, "EconomicsDeposit", money);
+                }
             }
 
-            if (config.Rewards.Money > 0 && IQEconomic != null && IQEconomic.IsLoaded)
+            if (IQEconomic != null && IQEconomic.IsLoaded)
             {
-                var money = config.Rewards.Money * level;
-                IQEconomic?.Call("API_SET_BALANCE", player.UserIDString, (int)money);
-                Message(player, "EconomicsDeposit", money);
+                var money = config.Rewards.Money.Get(skill) * level;
+                if (money > 0)
+                {
+                    IQEconomic?.Call("API_SET_BALANCE", player.UserIDString, (int)money);
+                    Message(player, "EconomicsDeposit", (int)money);
+                }
             }
 
-            if (config.Rewards.Points > 0 && ServerRewards != null && ServerRewards.IsLoaded)
+            if (ServerRewards != null && ServerRewards.IsLoaded)
             {
-                var points = config.Rewards.Points * level;
-                ServerRewards?.Call("AddPoints", player.UserIDString, points);
-                Message(player, "ServerRewardPoints", points);
+                var points = config.Rewards.Points.Get(skill) * level;
+                if (points > 0)
+                {
+                    ServerRewards?.Call("AddPoints", player.UserIDString, (int)points);
+                    Message(player, "ServerRewardPoints", (int)points);
+                }
             }
 
-            if (config.Rewards.XP > 0 && SkillTree != null && SkillTree.IsLoaded)
+            if (SkillTree != null && SkillTree.IsLoaded)
             {
-                var xp = config.Rewards.XP * level;
-                SkillTree?.Call("AwardXP", player, xp);
-                Message(player, "SkillTreeXP", xp);
+                var xp = config.Rewards.XP.Get(skill) * level;
+                if (xp > 0)
+                {
+                    SkillTree?.Call("AwardXP", player, xp);
+                    Message(player, "SkillTreeXP", xp);
+                }
             }
         }
 
@@ -2235,7 +2441,7 @@ namespace Oxide.Plugins
             base.LoadConfig();
             try
             {
-                config = Config.ReadObject<Configuration>();                
+                config = Config.ReadObject<Configuration>();
             }
             catch (Exception ex)
             {
@@ -2312,7 +2518,7 @@ namespace Oxide.Plugins
                         return getGathMult(GetLevel(userID, skill), Skills.SKINNING);
                     case "WC":
                         return getGathMult(GetLevel(userID, skill), Skills.WOODCUTTING);
-                }                
+                }
             }
 
             return multiplier;
