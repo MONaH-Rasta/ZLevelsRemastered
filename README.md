@@ -289,11 +289,11 @@ Shortcut codes for skills are:
 **These hooks are called after Item/ItemAmount is modified.**
 
 ```cs
-        void OnZLevelDispenserGather(ResourceDispenser dispenser, BasePlayer player, Item item, int prevAmount, int newAmount, bool isPowerTool) { }
+void OnZLevelDispenserGather(ResourceDispenser dispenser, BasePlayer player, Item item, int prevAmount, int newAmount, bool isPowerTool) { }
 
-        void OnZLevelCollectiblePickup(ItemAmount ia, BasePlayer player, CollectibleEntity ce, int prevAmount, float newAmount) { }
+void OnZLevelCollectiblePickup(ItemAmount ia, BasePlayer player, CollectibleEntity ce, int prevAmount, float newAmount) { }
 
-        void OnZLevelGrowableGathered(GrowableEntity ge, Item item, BasePlayer player, int prevAmount, int newAmount) { }
+void OnZLevelGrowableGathered(GrowableEntity ge, Item item, BasePlayer player, int prevAmount, int newAmount) { }
 ```
 
 ## Credits
