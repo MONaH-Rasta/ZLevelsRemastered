@@ -11,9 +11,16 @@ using UnityEngine;
 using Newtonsoft.Json;
 using Rust;
 
+/*
+Fixed OnCollectiblePickup.NullReferenceException
+Fixed potential floating point precision issues
+Added null check TOD when unloading
+Added `Additional Boost Multipliers` for vip
+*/
+
 namespace Oxide.Plugins
 {
-    [Info("ZLevels Remastered", "nivex", "3.2.0")]
+    [Info("ZLevels Remastered", "nivex", "3.2.1")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
 
     class ZLevelsRemastered : RustPlugin
@@ -21,10 +28,10 @@ namespace Oxide.Plugins
         [PluginReference]
         Plugin EventManager, CraftingController, ZoneManager, Economics, IQEconomic, ServerRewards, SkillTree;
 
-        private StoredData data = new StoredData();
+        private StoredData data = new();
         private Dictionary<string, ItemDefinition> CraftItems;
-        private CraftData _craftData = new CraftData();
-        private StringBuilder _sb = new StringBuilder();
+        private CraftData _craftData = new();
+        private StringBuilder _sb = new();
         private bool newSaveDetected;
         private bool bonusOn;
         private int MaxB = 10001;
@@ -44,7 +51,7 @@ namespace Oxide.Plugins
 
         private class CraftData
         {
-            public Dictionary<string, CraftInfo> CraftList = new Dictionary<string, CraftInfo>();
+            public Dictionary<string, CraftInfo> CraftList = new();
             public CraftData() { }
         }
 
@@ -59,7 +66,7 @@ namespace Oxide.Plugins
 
         private class StoredData
         {
-            public Hash<ulong, PlayerInfo> PlayerInfo = new Hash<ulong, PlayerInfo>();
+            public Hash<ulong, PlayerInfo> PlayerInfo = new();
             public StoredData() { }
         }
 
@@ -79,51 +86,176 @@ namespace Oxide.Plugins
             XP_MULTIPLIER,
         }
 
-        private class PlayerInfo
+        private class PlayerInfo : IEquatable<PlayerInfo>
         {
+            private double _acquireLevel = 1.0;
+            private double _acquirePoints = 10.0;
+            private double _craftingLevel = 1.0;
+            private double _craftingPoints = 10.0;
+            private double _miningLevel = 1.0;
+            private double _miningPoints = 10.0;
+            private double _skinningLevel = 1.0;
+            private double _skinningPoints = 10.0;
+            private double _woodcuttingLevel = 1.0;
+            private double _woodcuttingPoints = 10.0;
+            private double _lastDeath = 0.0;
+            private double _xpMultiplier = 100.0;
+
+            private double RoundValue(double value) => Math.Round(value, 2, MidpointRounding.AwayFromZero);
+
             [JsonProperty(PropertyName = "AL")]
-            public double ACQUIRE_LEVEL = 1;
+            public double ACQUIRE_LEVEL
+            {
+                get => RoundValue(_acquireLevel);
+                set => _acquireLevel = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "AP")]
-            public double ACQUIRE_POINTS = 10;
+            public double ACQUIRE_POINTS
+            {
+                get => RoundValue(_acquirePoints);
+                set => _acquirePoints = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "CL")]
-            public double CRAFTING_LEVEL = 1;
+            public double CRAFTING_LEVEL
+            {
+                get => RoundValue(_craftingLevel);
+                set => _craftingLevel = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "CP")]
-            public double CRAFTING_POINTS = 10;
+            public double CRAFTING_POINTS
+            {
+                get => RoundValue(_craftingPoints);
+                set => _craftingPoints = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "ML")]
-            public double MINING_LEVEL = 1;
+            public double MINING_LEVEL
+            {
+                get => RoundValue(_miningLevel);
+                set => _miningLevel = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "MP")]
-            public double MINING_POINTS = 10;
+            public double MINING_POINTS
+            {
+                get => RoundValue(_miningPoints);
+                set => _miningPoints = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "SL")]
-            public double SKINNING_LEVEL = 1;
+            public double SKINNING_LEVEL
+            {
+                get => RoundValue(_skinningLevel);
+                set => _skinningLevel = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "SP")]
-            public double SKINNING_POINTS = 10;
+            public double SKINNING_POINTS
+            {
+                get => RoundValue(_skinningPoints);
+                set => _skinningPoints = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "WCL")]
-            public double WOODCUTTING_LEVEL = 1;
+            public double WOODCUTTING_LEVEL
+            {
+                get => RoundValue(_woodcuttingLevel);
+                set => _woodcuttingLevel = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "WCP")]
-            public double WOODCUTTING_POINTS = 10;
+            public double WOODCUTTING_POINTS
+            {
+                get => RoundValue(_woodcuttingPoints);
+                set => _woodcuttingPoints = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "LD")]
-            public double LAST_DEATH;
+            public double LAST_DEATH
+            {
+                get => RoundValue(_lastDeath);
+                set => _lastDeath = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "XPM")]
-            public double XP_MULTIPLIER = 100;
+            public double XP_MULTIPLIER
+            {
+                get => RoundValue(_xpMultiplier);
+                set => _xpMultiplier = RoundValue(value);
+            }
 
             [JsonProperty(PropertyName = "CUI")]
-            public bool CUI = true;
+            public bool CUI { get; set; } = true;
 
             [JsonProperty(PropertyName = "ONOFF")]
-            public bool ENABLED = true;
+            public bool ENABLED { get; set; } = true;
 
             public PlayerInfo() { }
+
+            public bool Equals(PlayerInfo other)
+            {
+                if (other == null)
+                    return false;
+
+                return ACQUIRE_LEVEL == other.ACQUIRE_LEVEL &&
+                       ACQUIRE_POINTS == other.ACQUIRE_POINTS &&
+                       CRAFTING_LEVEL == other.CRAFTING_LEVEL &&
+                       CRAFTING_POINTS == other.CRAFTING_POINTS &&
+                       MINING_LEVEL == other.MINING_LEVEL &&
+                       MINING_POINTS == other.MINING_POINTS &&
+                       SKINNING_LEVEL == other.SKINNING_LEVEL &&
+                       SKINNING_POINTS == other.SKINNING_POINTS &&
+                       WOODCUTTING_LEVEL == other.WOODCUTTING_LEVEL &&
+                       WOODCUTTING_POINTS == other.WOODCUTTING_POINTS &&
+                       XP_MULTIPLIER == other.XP_MULTIPLIER &&
+                       CUI == other.CUI &&
+                       ENABLED == other.ENABLED;
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is PlayerInfo other && Equals(other);
+            }
+
+            public override int GetHashCode()
+            {
+                HashCode hash = new();
+                hash.Add(ACQUIRE_LEVEL);
+                hash.Add(ACQUIRE_POINTS);
+                hash.Add(CRAFTING_LEVEL);
+                hash.Add(CRAFTING_POINTS);
+                hash.Add(MINING_LEVEL);
+                hash.Add(MINING_POINTS);
+                hash.Add(SKINNING_LEVEL);
+                hash.Add(SKINNING_POINTS);
+                hash.Add(WOODCUTTING_LEVEL);
+                hash.Add(WOODCUTTING_POINTS);
+                hash.Add(XP_MULTIPLIER);
+                hash.Add(CUI);
+                hash.Add(ENABLED);
+                return hash.ToHashCode();
+            }
+
+            public static bool operator ==(PlayerInfo left, PlayerInfo right)
+            {
+                if (ReferenceEquals(left, right))
+                    return true;
+
+                if (left is null)
+                    return false;
+
+                return left.Equals(right);
+            }
+
+            public static bool operator !=(PlayerInfo left, PlayerInfo right)
+            {
+                return !(left == right);
+            }
+
+            internal bool IsDefault(PlayerInfo other) => Equals(other);
         }
 
         #region Main
@@ -152,6 +284,7 @@ namespace Oxide.Plugins
             {
                 DestroyGUI(player);
             }
+            if (TOD_Sky.Instance == null || TOD_Sky.Instance.Components == null || TOD_Sky.Instance.Components.Time == null) return;
             TOD_Sky.Instance.Components.Time.OnSunrise -= OnTimeSunrise;
             TOD_Sky.Instance.Components.Time.OnSunset -= OnTimeSunset;
         }
@@ -355,20 +488,19 @@ namespace Oxide.Plugins
 
         private void OnDispenserBonus(ResourceDispenser dispenser, BasePlayer player, Item item) => OnDispenserGather(dispenser, player, item);
 
-        private List<string> _warnings = new List<string>();
+        private List<string> _warnings = new();
 
         private object OnCollectiblePickup(CollectibleEntity collectible, BasePlayer player)
         {
-            if (!IsValid(player) || !hasRights(player.UserIDString))
+            if (!collectible || collectible.itemList.IsNullOrEmpty() || !IsValid(player) || !hasRights(player.UserIDString))
                 return null;
 
             var pi = GetPlayerInfo(player);
 
-            if (!pi.ENABLED)
+            if (pi == null || !pi.ENABLED)
                 return null;
 
-            bool enabled;
-            if (config.functions.enabledCollectibleEntity.TryGetValue(collectible.ShortPrefabName, out enabled) && !enabled)
+            if (config.functions.enabledCollectibleEntity.TryGetValue(collectible.ShortPrefabName, out var enabled) && !enabled)
                 return null;
 
             Skills skill;
@@ -376,6 +508,8 @@ namespace Oxide.Plugins
             for (int i = 0; i < collectible.itemList.Length; i++)
             {
                 ItemAmount itemAmount = collectible.itemList[i];
+                if (itemAmount == null) continue;
+                if (itemAmount.itemDef == null) continue;
                 switch (itemAmount.itemDef.shortname)
                 {
                     case "corn":
@@ -410,7 +544,9 @@ namespace Oxide.Plugins
                         skill = config.settings.AcquireWood ? Skills.ACQUIRE : Skills.WOODCUTTING;
                         break;
                     default:
-                        skill = IsSkillEnabled(Skills.ACQUIRE) ? Skills.ACQUIRE : Skills.SKINNING;
+                        if (IsSkillEnabled(Skills.ACQUIRE)) skill = Skills.ACQUIRE;
+                        else if (IsSkillEnabled(Skills.SKINNING)) skill = Skills.SKINNING;
+                        else return null;
                         if (!_warnings.Contains(itemAmount.itemDef.shortname))
                         {
                             PrintWarning($"WARNING: {player} picked up undefined item: {itemAmount.itemDef.shortname}. Defaulting to {skill} skill.");
@@ -434,7 +570,11 @@ namespace Oxide.Plugins
 
         private void OnTimeSunset()
         {
-            if (!config.nightbonus.enableNightBonus || bonusOn) return;
+            if (!config.nightbonus.enableNightBonus || bonusOn)
+            {
+                return;
+            }
+
             bonusOn = true;
             pointsPerHitCurrent = config.nightbonus.pointsPerHitAtNight;
             resourceMultipliersCurrent = config.nightbonus.resourceMultipliersAtNight;
@@ -450,7 +590,10 @@ namespace Oxide.Plugins
 
         private void OnTimeSunrise()
         {
-            if (!config.nightbonus.enableNightBonus || !bonusOn) return;
+            if (!config.nightbonus.enableNightBonus || !bonusOn)
+            {
+                return;
+            }
             bonusOn = false;
             pointsPerHitCurrent = config.settings.pointsPerHit;
             resourceMultipliersCurrent = config.settings.resourceMultipliers;
@@ -491,6 +634,7 @@ namespace Oxide.Plugins
 
             return null;
         }
+
 
         private object OnItemCraft(ItemCraftTask task, BasePlayer crafter, Item fromTempBlueprint)
         {
@@ -553,7 +697,7 @@ namespace Oxide.Plugins
         }
         private List<int> GetStacks(int amount, int maxStack)
         {
-            var stacks = new List<int>();
+            List<int> stacks = new();
             while (amount > maxStack && amount > 0)
             {
                 amount -= maxStack;
@@ -708,8 +852,7 @@ namespace Oxide.Plugins
                 user.Reply(_sb.ToString().TrimEnd('|'));
                 return;
             }
-            double points;
-            if (!double.TryParse(args[1], out points) || points < 1)
+            if (!double.TryParse(args[1], out var points) || points < 1)
             {
                 user.Reply("Incorrect number. Must be greater than or equal to 1");
                 return;
@@ -770,15 +913,20 @@ namespace Oxide.Plugins
                 user.Reply(_("PLAYER NOT FOUND", user.Id));
                 return;
             }
-            PlayerInfo playerData;
-            if (!data.PlayerInfo.TryGetValue(Convert.ToUInt64(target.Id), out playerData))
+            if (!data.PlayerInfo.TryGetValue(Convert.ToUInt64(target.Id), out var playerData))
             {
                 user.Reply("PlayerData is NULL!");
                 return;
             }
             if (args.Length < 2)
             {
-                user.Reply($"Current XP multiplier for player '{target.Name}' is {playerData.XP_MULTIPLIER}%");
+                var bonus1 = getXpMulti(playerData, target.Id);
+                var baseMultiplier = playerData.XP_MULTIPLIER;
+                if (baseMultiplier != bonus1)
+                {
+                    user.Reply($"Current XP multiplier for player '{target.Name}' is {baseMultiplier}% with vip raising total to {bonus1}%");
+                }
+                else user.Reply($"Current XP multiplier for player '{target.Name}' is {baseMultiplier}%");
                 return;
             }
             double multiplier = -1;
@@ -791,7 +939,12 @@ namespace Oxide.Plugins
                 }
             }
             playerData.XP_MULTIPLIER = multiplier;
-            user.Reply($"New XP multiplier for player '{target.Name}' is {playerData.XP_MULTIPLIER}%");
+            var bonus2 = getXpMulti(playerData, target.Id);
+            if (multiplier != bonus2)
+            {
+                user.Reply($"New XP multiplier for player '{target.Name}' is {getXpMulti(playerData, target.Id)}% with vip raising total to {bonus2}%");
+            }
+            else user.Reply($"New XP multiplier for player '{target.Name}' is {getXpMulti(playerData, target.Id)}%");
         }
 
         private void InfoCommand(IPlayer user, string command, string[] args)
@@ -808,13 +961,12 @@ namespace Oxide.Plugins
                 user.Reply(_("PLAYER NOT FOUND", user.Id));
                 return;
             }
-            PlayerInfo playerData;
-            if (!data.PlayerInfo.TryGetValue(Convert.ToUInt64(target.Id), out playerData))
+            if (!data.PlayerInfo.TryGetValue(Convert.ToUInt64(target.Id), out var playerData))
             {
                 user.Reply("PlayerData is NULL!");
                 return;
             }
-            TextTable textTable = new TextTable();
+            TextTable textTable = new();
             textTable.AddColumn("FieldInfo");
             textTable.AddColumn("Level");
             textTable.AddColumn("Points");
@@ -823,7 +975,7 @@ namespace Oxide.Plugins
             textTable.AddRow(new string[] { _("MININGSkill", target.Id), $"{playerData.MINING_LEVEL:#0.##}", $"{playerData.MINING_POINTS:#0.##}" });
             textTable.AddRow(new string[] { _("SKINNINGSkill", target.Id), $"{playerData.SKINNING_LEVEL:#0.##}", $"{playerData.SKINNING_POINTS:#0.##}" });
             textTable.AddRow(new string[] { _("WOODCUTTINGSkill", target.Id), $"{playerData.WOODCUTTING_LEVEL:#0.##}", $"{playerData.WOODCUTTING_POINTS:#0.##}" });
-            textTable.AddRow(new string[] { _("XPM", target.Id), $"{playerData.XP_MULTIPLIER:#0.##}%", string.Empty });
+            textTable.AddRow(new string[] { _("XPM", target.Id), $"{getXpMulti(playerData, target.Id):#0.##}%", string.Empty });
             user.Reply($"\n{_("STATS", target.Id)}{target.Name}\n{textTable}");
         }
 
@@ -976,16 +1128,7 @@ namespace Oxide.Plugins
 
             foreach (var info in data.PlayerInfo)
             {
-                if (info.Value.ACQUIRE_LEVEL == pi.ACQUIRE_LEVEL &&
-                    info.Value.CRAFTING_LEVEL == pi.CRAFTING_LEVEL &&
-                    info.Value.MINING_LEVEL == pi.MINING_LEVEL &&
-                    info.Value.SKINNING_LEVEL == pi.SKINNING_LEVEL &&
-                    info.Value.WOODCUTTING_LEVEL == pi.WOODCUTTING_LEVEL &&
-                    info.Value.ACQUIRE_POINTS == pi.ACQUIRE_POINTS &&
-                    info.Value.CRAFTING_POINTS == pi.CRAFTING_POINTS &&
-                    info.Value.MINING_POINTS == pi.MINING_POINTS &&
-                    info.Value.SKINNING_POINTS == pi.SKINNING_POINTS &&
-                    info.Value.WOODCUTTING_POINTS == pi.WOODCUTTING_POINTS)
+                if (info.Value.IsDefault(pi))
                 {
                     count++;
                 }
@@ -1018,16 +1161,7 @@ namespace Oxide.Plugins
 
             foreach (var info in data.PlayerInfo.ToList())
             {
-                if (info.Value.ACQUIRE_LEVEL == pi.ACQUIRE_LEVEL &&
-                    info.Value.CRAFTING_LEVEL == pi.CRAFTING_LEVEL &&
-                    info.Value.MINING_LEVEL == pi.MINING_LEVEL &&
-                    info.Value.SKINNING_LEVEL == pi.SKINNING_LEVEL &&
-                    info.Value.WOODCUTTING_LEVEL == pi.WOODCUTTING_LEVEL &&
-                    info.Value.ACQUIRE_POINTS == pi.ACQUIRE_POINTS &&
-                    info.Value.CRAFTING_POINTS == pi.CRAFTING_POINTS &&
-                    info.Value.MINING_POINTS == pi.MINING_POINTS &&
-                    info.Value.SKINNING_POINTS == pi.SKINNING_POINTS &&
-                    info.Value.WOODCUTTING_POINTS == pi.WOODCUTTING_POINTS)
+                if (info.Value.IsDefault(pi))
                 {
                     count++;
                     data.PlayerInfo.Remove(info.Key);
@@ -1078,7 +1212,7 @@ namespace Oxide.Plugins
             var pi = GetPlayerInfo(player.userID);
             var alive = ReadableTimeSpan(DateTime.UtcNow - ToDateTimeFromEpoch(pi.LAST_DEATH));
             _sb.AppendLine().AppendLine($"Time alive: {alive}");
-            _sb.AppendLine($"XP rates for you are {pi.XP_MULTIPLIER}%");
+            _sb.AppendLine($"XP rates for you are {getXpMulti(pi, player.UserIDString)}%");
             SendReply(player, _sb.ToString());
         }
 
@@ -1094,7 +1228,7 @@ namespace Oxide.Plugins
             _sb.Clear();
             var colors = config.settings.colors;
             var craftingDetails = config.settings.craftingDetails;
-            var xpm = GetPlayerInfo(player.userID).XP_MULTIPLIER / 100f;
+            var xpm = getXpMulti(GetPlayerInfo(player.userID), player.UserIDString) / 100f;
             var m = player.GetHeldEntity() is Jackhammer ? pointsPerHitPowerToolCurrent.Get(Skills.MINING) : pointsPerHitCurrent.Get(Skills.MINING);
             var wc = player.GetHeldEntity() is Chainsaw ? pointsPerHitPowerToolCurrent.Get(Skills.WOODCUTTING) : pointsPerHitCurrent.Get(Skills.WOODCUTTING);
 
@@ -1186,7 +1320,29 @@ namespace Oxide.Plugins
 
         private void RegisterPermissions()
         {
-            permission.RegisterPermission(config.generic.vip, this);
+            foreach (var name in config.generic.vip.Keys)
+            {
+                if (string.IsNullOrEmpty(name))
+                {
+                    continue;
+                }
+                if (name.Contains("."))
+                {
+                    if (!permission.PermissionExists(name))
+                    {
+                        permission.RegisterPermission(name, this);
+                    }
+                }
+                else
+                {
+                    if (!permission.GroupExists(name))
+                    {
+                        permission.CreateGroup(name, name, 0);
+                    }
+                }
+            }
+
+            permission.RegisterPermission(config.generic.nowipe, this);
             permission.RegisterPermission(config.generic.permissionName, this);
             permission.RegisterPermission(config.generic.permissionNameXP, this);
             permission.RegisterPermission(config.generic.AllowChainsawGather, this);
@@ -1272,7 +1428,7 @@ namespace Oxide.Plugins
 
             if (config.functions.enabledCollectibleEntity == null)
             {
-                config.functions.enabledCollectibleEntity = new Dictionary<string, bool>();
+                config.functions.enabledCollectibleEntity = new();
             }
 
             bool updated = false;
@@ -1316,17 +1472,19 @@ namespace Oxide.Plugins
             catch (Exception ex)
             {
                 Puts("CraftData threw an exception!");
-                UnityEngine.Debug.LogException(ex);
+                Puts(ex.ToString());
             }
 
             if (_craftData == null)
             {
-                _craftData = new CraftData();
+                Puts("Crafting data is null and has been reset!");
+                _craftData = new();
             }
 
             if (_craftData.CraftList == null)
             {
-                _craftData.CraftList = new Dictionary<string, CraftInfo>();
+                Puts("Crafting list is null and has been reset!");
+                _craftData.CraftList = new();
             }
 
             if (_craftData.CraftList.Count == 0)
@@ -1343,16 +1501,15 @@ namespace Oxide.Plugins
             catch (Exception ex)
             {
                 Puts("StoredData threw an exception!");
-                UnityEngine.Debug.LogException(ex);
+                Puts(ex.ToString());
             }
 
             if (data == null || data.PlayerInfo == null)
             {
                 Puts("Data is null, resetting to defaults!");
-                data = new StoredData();
+                data = new();
             }
-
-            if (newSaveDetected)
+            else if (newSaveDetected)
             {
                 Puts("Wiping data... new save detected");
                 WipeData();
@@ -1361,14 +1518,14 @@ namespace Oxide.Plugins
 
         private void WipeData()
         {
-            if (string.IsNullOrEmpty(config.generic.vip))
+            if (string.IsNullOrEmpty(config.generic.nowipe))
             {
-                data = new StoredData();
+                data = new();
                 return;
             }
             foreach (var pair in data.PlayerInfo.ToList())
             {
-                if (permission.UserHasPermission(pair.Key.ToString(), config.generic.vip))
+                if (permission.UserHasPermission(pair.Key.ToString(), config.generic.nowipe))
                 {
                     continue;
                 }
@@ -1389,8 +1546,7 @@ namespace Oxide.Plugins
                     data.PlayerInfo[p.Key].XP_MULTIPLIER = multiplier;
                 return;
             }
-            PlayerInfo playerData;
-            if (data.PlayerInfo.TryGetValue(userID, out playerData))
+            if (data.PlayerInfo.TryGetValue(userID, out var playerData))
                 playerData.XP_MULTIPLIER = multiplier;
         }
 
@@ -1557,7 +1713,7 @@ namespace Oxide.Plugins
             var Points = getPoints(pi, skill);
             var newAmount = Mathf.CeilToInt(prevAmount * (float)getGathMult(Level, skill));
             var pointsToGet = isPowerTool ? pointsPerHitPowerToolCurrent.Get(skill) : pointsPerHitCurrent.Get(skill);
-            Points += pointsToGet * (pi.XP_MULTIPLIER / 100.0);
+            Points += pointsToGet * (getXpMulti(pi, player.UserIDString) / 100.0);
 
             if (Points >= getLevelPoints(Level + 1))
             {
@@ -1705,6 +1861,28 @@ namespace Oxide.Plugins
             return Math.Round(config.settings.defaultMultipliers.Get(skill) + resourceMultipliersCurrent.Get(skill) * 0.1d * (skillLevel - 1.0), 2);
         }
 
+        private double getXpMulti(PlayerInfo pi, string userid)
+        {
+            double baseMultiplier = pi.XP_MULTIPLIER;
+            double highestMultiplier = double.MinValue;
+            foreach (var (name, multiplier) in config.generic.vip)
+            {
+                if (string.IsNullOrEmpty(name) || multiplier < highestMultiplier)
+                {
+                    continue;
+                }
+                if (name.Contains('.') ? permission.UserHasPermission(userid, name) : permission.UserHasGroup(userid, name))
+                {
+                    highestMultiplier = multiplier;
+                }
+            }
+            if (highestMultiplier == double.MinValue)
+            {
+                highestMultiplier = 1.0;
+            }
+            return baseMultiplier * highestMultiplier;
+        }
+
         private bool IsCraftingEnabled()
         {
             if (CraftingController != null) return false;
@@ -1786,8 +1964,7 @@ namespace Oxide.Plugins
         private ItemDefinition GetItem(string shortname)
         {
             if (string.IsNullOrEmpty(shortname) || CraftItems == null) return null;
-            ItemDefinition item;
-            if (CraftItems.TryGetValue(shortname, out item)) return item;
+            if (CraftItems.TryGetValue(shortname, out var item)) return item;
             return null;
         }
 
@@ -1821,15 +1998,14 @@ namespace Oxide.Plugins
             {
                 if (definition.Value.shortname.Length >= 1)
                 {
-                    CraftInfo p;
-                    if (_craftData.CraftList.TryGetValue(definition.Value.shortname, out p))
+                    if (_craftData.CraftList.TryGetValue(definition.Value.shortname, out var p))
                     {
                         if (p.Enabled) { enabled++; }
                         loaded++;
                     }
                     else
                     {
-                        var z = new CraftInfo
+                        CraftInfo z = new()
                         {
                             shortName = definition.Value.shortname,
                             MaxBulkCraft = MaxB,
@@ -2034,7 +2210,7 @@ namespace Oxide.Plugins
 
         private PlayerInfo CreatePlayerInfo()
         {
-            var pi = new PlayerInfo
+            return new()
             {
                 ACQUIRE_LEVEL = config.settings.stats.acquire_level,
                 ACQUIRE_POINTS = config.settings.stats.acquire_points,
@@ -2048,14 +2224,11 @@ namespace Oxide.Plugins
                 WOODCUTTING_POINTS = config.settings.stats.woodcutting_points,
                 XP_MULTIPLIER = config.settings.stats.xpm
             };
-
-            return pi;
         }
 
         private PlayerInfo GetPlayerInfo(ulong userID)
         {
-            PlayerInfo pi;
-            if (!data.PlayerInfo.TryGetValue(userID, out pi))
+            if (!data.PlayerInfo.TryGetValue(userID, out var pi))
             {
                 data.PlayerInfo[userID] = pi = CreatePlayerInfo();
 
@@ -2074,31 +2247,31 @@ namespace Oxide.Plugins
         private class Configuration
         {
             [JsonProperty(PropertyName = "CUI")]
-            public ConfigurationCui cui { get; set; } = new ConfigurationCui();
+            public ConfigurationCui cui { get; set; } = new();
 
             [JsonProperty(PropertyName = "Functions")]
-            public ConfigurationFunctions functions { get; set; } = new ConfigurationFunctions();
+            public ConfigurationFunctions functions { get; set; } = new();
 
             [JsonProperty(PropertyName = "Generic")]
-            public ConfigurationGeneric generic { get; set; } = new ConfigurationGeneric();
+            public ConfigurationGeneric generic { get; set; } = new();
 
             [JsonProperty(PropertyName = "Night Bonus")]
-            public ConfigurationNightBonus nightbonus { get; set; } = new ConfigurationNightBonus();
+            public ConfigurationNightBonus nightbonus { get; set; } = new();
 
             [JsonProperty(PropertyName = "Settings")]
-            public ConfigurationSettings settings { get; set; } = new ConfigurationSettings();
+            public ConfigurationSettings settings { get; set; } = new();
 
             [JsonProperty(PropertyName = "Level Up Rewards (Reward * Level = Amount)")]
-            public Rewards Rewards { get; set; } = new Rewards();
+            public Rewards Rewards { get; set; } = new();
         }
 
         private class ConfigurationCui
         {
             [JsonProperty(PropertyName = "Bounds")]
-            public ConfigurationCuiPositions cuiPositioning { get; set; } = new ConfigurationCuiPositions("0.725", "0.83", "0.02", "0.1225");
+            public ConfigurationCuiPositions cuiPositioning { get; set; } = new("0.725", "0.83", "0.02", "0.1225");
 
             [JsonProperty(PropertyName = "Xp Bar Colors")]
-            public ConfigurationColors cuiColors { get; set; } = new ConfigurationColors("0.4 0 0.8 0.5", "0 1 0 0.5", "0 0 1 0.5", "1 0 0 0.5", "1 0.6 0 0.5");
+            public ConfigurationColors cuiColors { get; set; } = new("0.4 0 0.8 0.5", "0 1 0 0.5", "0 0 1 0.5", "1 0 0 0.5", "1 0.6 0 0.5");
 
             [JsonProperty(PropertyName = "Bounds Background")]
             public string cuiBoundsBackground { get; set; } = "0.1 0.1 0.1 0.1";
@@ -2128,7 +2301,7 @@ namespace Oxide.Plugins
         private class ConfigurationFunctions
         {
             [JsonProperty(PropertyName = "Collectible Entities", ObjectCreationHandling = ObjectCreationHandling.Replace)]
-            public Dictionary<string, bool> enabledCollectibleEntity { get; set; } = new Dictionary<string, bool>();
+            public Dictionary<string, bool> enabledCollectibleEntity { get; set; } = new();
 
             [JsonProperty(PropertyName = "Enable Collectible Pickup")]
             public bool enableCollectiblePickup { get; set; } = true;
@@ -2196,8 +2369,19 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Permission Name XP")]
             public string permissionNameXP { get; set; } = "zlevelsremastered.noxploss";
 
+            [JsonProperty(PropertyName = "Additional Boost Multipliers")]
+            public Dictionary<string, double> vip { get; set; } = new()
+            {
+                ["zlevelsremastered.vip1"] = 2.0,
+                ["zlevelsremastered.vip2"] = 3.0,
+                ["zlevelsremastered.vip3"] = 4.0,
+                ["zlevelsvip1"] = 5.0,
+                ["zlevelsvip2"] = 6.0,
+                ["zlevelsvip3"] = 7.0,
+            };
+
             [JsonProperty(PropertyName = "Permission Name No Wipes")]
-            public string vip { get; set; } = "zlevelsremastered.nowipes";
+            public string nowipe { get; set; } = "zlevelsremastered.nowipes";
 
             [JsonProperty(PropertyName = "Player CUI Default Enabled")]
             public bool playerCuiDefaultEnabled { get; set; } = true;
@@ -2218,13 +2402,13 @@ namespace Oxide.Plugins
         private class ConfigurationNightBonus
         {
             [JsonProperty(PropertyName = "Points Per Hit At Night")]
-            public ConfigurationResources pointsPerHitAtNight { get; set; } = new ConfigurationResources(60, null, 60, 60, 60);
+            public ConfigurationResources pointsPerHitAtNight { get; set; } = new(60, null, 60, 60, 60);
 
             [JsonProperty(PropertyName = "Points Per PowerTool At Night")]
-            public ConfigurationResources pointsPerPowerToolAtNight { get; set; } = new ConfigurationResources(null, null, 60, null, 60);
+            public ConfigurationResources pointsPerPowerToolAtNight { get; set; } = new(null, null, 60, null, 60);
 
             [JsonProperty(PropertyName = "Resource Per Level Multiplier At Night")]
-            public ConfigurationResources resourceMultipliersAtNight { get; set; } = new ConfigurationResources(2, null, 2, 2, 2);
+            public ConfigurationResources resourceMultipliersAtNight { get; set; } = new(2, null, 2, 2, 2);
 
             [JsonProperty(PropertyName = "Enable Night Bonus")]
             public bool enableNightBonus { get; set; }
@@ -2239,37 +2423,37 @@ namespace Oxide.Plugins
         private class ConfigurationSettings
         {
             [JsonProperty(PropertyName = "Crafting Details", ObjectCreationHandling = ObjectCreationHandling.Replace)]
-            public ConfigurationCraftingDetails craftingDetails { get; set; } = new ConfigurationCraftingDetails(1, 3, 5);
+            public ConfigurationCraftingDetails craftingDetails { get; set; } = new(1, 3, 5);
 
             [JsonProperty(PropertyName = "Default Resource Multiplier")]
-            public ConfigurationResources defaultMultipliers { get; set; } = new ConfigurationResources(1, null, 1, 1, 1);
+            public ConfigurationResources defaultMultipliers { get; set; } = new(1, null, 1, 1, 1);
 
             [JsonProperty(PropertyName = "Level Caps")]
-            public ConfigurationResources levelCaps { get; set; } = new ConfigurationResources(200, 20, 200, 200, 200);
+            public ConfigurationResources levelCaps { get; set; } = new(200, 20, 200, 200, 200);
 
             [JsonProperty(PropertyName = "Percent Lost On Death")]
-            public ConfigurationResources percentLostOnDeath { get; set; } = new ConfigurationResources(50, 50, 50, 50, 50);
+            public ConfigurationResources percentLostOnDeath { get; set; } = new(50, 50, 50, 50, 50);
 
             [JsonProperty(PropertyName = "Percent Lost On Suicide")]
-            public ConfigurationResources percentLostOnSuicide { get; set; } = new ConfigurationResources(0, 0, 0, 0, 0);
+            public ConfigurationResources percentLostOnSuicide { get; set; } = new(0, 0, 0, 0, 0);
 
             [JsonProperty(PropertyName = "No Penalty Zones", ObjectCreationHandling = ObjectCreationHandling.Replace)]
-            public List<string> zones { get; set; } = new List<string> { "adminzone1", "999999" };
+            public List<string> zones { get; set; } = new() { "adminzone1", "999999" };
 
             [JsonProperty(PropertyName = "Points Per Hit")]
-            public ConfigurationResources pointsPerHit { get; set; } = new ConfigurationResources(30, null, 30, 30, 30);
+            public ConfigurationResources pointsPerHit { get; set; } = new(30, null, 30, 30, 30);
 
             [JsonProperty(PropertyName = "Points Per Power Tool")]
-            public ConfigurationResources pointsPerPowerTool { get; set; } = new ConfigurationResources(null, null, 30, null, 30);
+            public ConfigurationResources pointsPerPowerTool { get; set; } = new(null, null, 30, null, 30);
 
             [JsonProperty(PropertyName = "Resource Per Level Multiplier")]
-            public ConfigurationResources resourceMultipliers { get; set; } = new ConfigurationResources(2, null, 2, 2, 2);
+            public ConfigurationResources resourceMultipliers { get; set; } = new(2, null, 2, 2, 2);
 
             [JsonProperty(PropertyName = "Skill Colors")]
-            public ConfigurationSkillColors colors { get; set; } = new ConfigurationSkillColors();
+            public ConfigurationSkillColors colors { get; set; } = new();
 
             [JsonProperty(PropertyName = "Starting Stats")]
-            public ConfigurationStartingStats stats { get; set; } = new ConfigurationStartingStats();
+            public ConfigurationStartingStats stats { get; set; } = new();
 
             [JsonProperty(PropertyName = "Use Mining Skill When Picking Up Stones And Ore")]
             public bool MiningStonesOre { get; set; } = true;
@@ -2554,13 +2738,13 @@ namespace Oxide.Plugins
         public class Rewards
         {
             [JsonProperty(PropertyName = "Economics Money")]
-            public RewardType Money { get; set; } = new RewardType();
+            public RewardType Money { get; set; } = new();
 
             [JsonProperty(PropertyName = "ServerRewards Points")]
-            public RewardType Points { get; set; } = new RewardType();
+            public RewardType Points { get; set; } = new();
 
             [JsonProperty(PropertyName = "SkillTree XP")]
-            public RewardType XP { get; set; } = new RewardType();
+            public RewardType XP { get; set; } = new();
         }
 
         public void GiveReward(BasePlayer player, Skills skill, double level)
@@ -2606,13 +2790,13 @@ namespace Oxide.Plugins
             }
         }
 
-        private Configuration config = new Configuration();
+        private Configuration config = new();
         private ConfigurationResources pointsPerPowerTool;
         private ConfigurationResources pointsPerHitCurrent;
         private ConfigurationResources pointsPerPowerToolAtNight;
         private ConfigurationResources pointsPerHitPowerToolCurrent;
         private ConfigurationResources resourceMultipliersCurrent;
-        private Dictionary<Skills, int> skillIndex = new Dictionary<Skills, int>();
+        private Dictionary<Skills, int> skillIndex = new();
 
         protected override void LoadConfig()
         {
@@ -2620,14 +2804,15 @@ namespace Oxide.Plugins
             try
             {
                 config = Config.ReadObject<Configuration>();
+                if (config == null) LoadDefaultConfig();
+                canSaveConfig = true;
             }
             catch (Exception ex)
             {
-                Debug.LogException(ex);
+                Puts(ex.ToString());
                 LoadDefaultConfig();
                 return;
             }
-            if (config == null) LoadDefaultConfig();
             CheckStartingStats();
             SaveConfig();
         }
@@ -2686,19 +2871,24 @@ namespace Oxide.Plugins
             }
         }
 
+        private bool canSaveConfig;
+
         protected override void SaveConfig()
         {
-            Config.WriteObject(config, true);
+            if (canSaveConfig)
+            {
+                Config.WriteObject(config, true);
+            }
         }
 
         protected override void LoadDefaultConfig()
         {
-            config = new Configuration();
+            config = new();
         }
 
         protected override void LoadDefaultMessages()
         {
-            lang.RegisterMessages(new Dictionary<string, string>
+            lang.RegisterMessages(new()
             {
                 {"StatsHeadline", "Level stats (/statinfo - To get more information about skills)"},
                 {"StatsText",   "-{0}\nLevel: {1} (+{4}% bonus) \nXP: {2}/{3} [{5}].\n<color=red>-{6} XP loss on death.</color>"},
@@ -2760,8 +2950,7 @@ namespace Oxide.Plugins
 
         private double GetLevel(ulong userID, string skill = "A")
         {
-            PlayerInfo pi;
-            if (data.PlayerInfo.TryGetValue(userID, out pi))
+            if (data.PlayerInfo.TryGetValue(userID, out var pi))
             {
                 switch (skill.ToUpper())
                 {
@@ -2805,41 +2994,40 @@ namespace Oxide.Plugins
                     pi.SKINNING_POINTS + "|" +
                     pi.WOODCUTTING_LEVEL + "|" +
                     pi.WOODCUTTING_POINTS + "|" +
-                    pi.XP_MULTIPLIER;
+                    getXpMulti(pi, playerid.ToString());
             }
             return string.Empty;
         }
 
         private bool api_SetPlayerInfo(ulong userid, string data)
         {
-            if (userid == 0 || data == null)
+            if (userid == 0 || data == null) { return false; }
+            if (!this.data.PlayerInfo.TryGetValue(userid, out var pi))
             {
-                return false;
-            }
-            PlayerInfo pi;
-            if (!this.data.PlayerInfo.TryGetValue(userid, out pi))
-            {
-                return false;
+                this.data.PlayerInfo[userid] = pi = CreatePlayerInfo();
+                pi.LAST_DEATH = ToEpochTime(DateTime.UtcNow);
+                pi.CUI = config.generic.playerCuiDefaultEnabled;
+                pi.ENABLED = config.generic.playerPluginDefaultEnabled;
             }
             string[] split = data.Split('|');
-            if (split.Length != 16)
+            if (split.Length < 14)
             {
                 return false;
             }
-            pi.ACQUIRE_LEVEL = Math.Round(double.Parse(split[0]), 2);
-            pi.ACQUIRE_POINTS = Math.Round(double.Parse(split[1]), 2);
-            pi.CRAFTING_LEVEL = Math.Round(double.Parse(split[2]), 2);
-            pi.CRAFTING_POINTS = Math.Round(double.Parse(split[3]), 2);
+            pi.ACQUIRE_LEVEL = double.Parse(split[0]);
+            pi.ACQUIRE_POINTS = double.Parse(split[1]);
+            pi.CRAFTING_LEVEL = double.Parse(split[2]);
+            pi.CRAFTING_POINTS = double.Parse(split[3]);
             pi.CUI = bool.Parse(split[4]);
-            pi.LAST_DEATH = Math.Round(double.Parse(split[5]), 2);
-            pi.MINING_LEVEL = Math.Round(double.Parse(split[6]), 2);
-            pi.MINING_POINTS = Math.Round(double.Parse(split[7]), 2);
+            pi.LAST_DEATH = double.Parse(split[5]);
+            pi.MINING_LEVEL = double.Parse(split[6]);
+            pi.MINING_POINTS = double.Parse(split[7]);
             pi.ENABLED = bool.Parse(split[8]);
-            pi.SKINNING_LEVEL = Math.Round(double.Parse(split[9]), 2);
-            pi.SKINNING_POINTS = Math.Round(double.Parse(split[10]), 2);
-            pi.WOODCUTTING_LEVEL = Math.Round(double.Parse(split[11]), 2);
-            pi.WOODCUTTING_POINTS = Math.Round(double.Parse(split[12]), 2);
-            pi.XP_MULTIPLIER = Math.Round(double.Parse(split[13]), 2);
+            pi.SKINNING_LEVEL = double.Parse(split[9]);
+            pi.SKINNING_POINTS = double.Parse(split[10]);
+            pi.WOODCUTTING_LEVEL = double.Parse(split[11]);
+            pi.WOODCUTTING_POINTS = double.Parse(split[12]);
+            pi.XP_MULTIPLIER = double.Parse(split[13]);
             BasePlayer target = BasePlayer.FindByID(userid);
             if (!target.IsRealNull() && target.IsConnected)
             {
