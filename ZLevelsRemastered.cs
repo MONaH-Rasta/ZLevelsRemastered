@@ -15,19 +15,23 @@ namespace Oxide.Plugins
     [Info("ZLevels Remastered", "nivex", "3.2.2")]
     [Description("Lets players level up as they harvest different resources and when crafting")]
 
-    class ZLevelsRemastered : RustPlugin
+    public class ZLevelsRemastered : RustPlugin
     {
-        [PluginReference]
-        Plugin EventManager, CraftingController, ZoneManager, Economics, IQEconomic, ServerRewards, SkillTree;
+        [PluginReference] readonly Plugin EventManager, CraftingController, ZoneManager, Economics, IQEconomic, ServerRewards, SkillTree;
 
-        private StoredData data = new();
-        private Dictionary<string, ItemDefinition> CraftItems;
-        private CraftData _craftData = new();
-        private StringBuilder _sb = new();
-        private bool newSaveDetected;
+        const int MaxB = 10001;
+        const int MinB = 10;
+
+        private readonly Skills[] _allSkills = new Skills[] { Skills.ACQUIRE, Skills.CRAFTING, Skills.MINING, Skills.SKINNING, Skills.WOODCUTTING };
+        private readonly StringBuilder _sb = new();
+        private readonly List<string> _warnings = new();
+
         private bool bonusOn;
-        private int MaxB = 10001;
-        private int MinB = 10;
+        private bool newSaveDetected;
+        private CraftData _craftData;
+        private Dictionary<string, ItemDefinition> CraftItems;
+        private StoredData _storedData;
+        private Timer _timer;
 
         public enum Skills
         {
@@ -38,8 +42,6 @@ namespace Oxide.Plugins
             WOODCUTTING,
             ALL
         }
-
-        private Skills[] AllSkills = new Skills[] { Skills.ACQUIRE, Skills.CRAFTING, Skills.MINING, Skills.SKINNING, Skills.WOODCUTTING };
 
         private class CraftData
         {
@@ -189,7 +191,7 @@ namespace Oxide.Plugins
 
             public bool Equals(PlayerInfo other)
             {
-                if (other == null)
+                if (other is null)
                     return false;
 
                 return ACQUIRE_LEVEL == other.ACQUIRE_LEVEL &&
@@ -259,7 +261,7 @@ namespace Oxide.Plugins
 
             int index = 0;
 
-            foreach (Skills skill in AllSkills)
+            foreach (Skills skill in _allSkills)
             {
                 if (IsSkillEnabled(skill))
                 {
@@ -270,6 +272,8 @@ namespace Oxide.Plugins
 
         private void Unload()
         {
+            _timer?.Destroy();
+            _timer = null;
             Clean();
             SaveData();
             foreach (var player in BasePlayer.activePlayerList)
@@ -335,7 +339,7 @@ namespace Oxide.Plugins
 
         private void OnEntityDeath(BasePlayer player, HitInfo hitInfo)
         {
-            if (hitInfo == null || !IsValid(player) || isZoneExcluded(player))
+            if (hitInfo is null || !IsValid(player) || isZoneExcluded(player))
             {
                 return;
             }
@@ -371,7 +375,7 @@ namespace Oxide.Plugins
 
             _sb.Clear();
 
-            foreach (Skills skill in AllSkills)
+            foreach (Skills skill in _allSkills)
             {
                 if (IsSkillEnabled(skill))
                 {
@@ -384,7 +388,7 @@ namespace Oxide.Plugins
                     }
                 }
             }
-            
+
             if (_sb.Length > 0)
             {
                 Message(player, "PenaltyText", _sb.ToString());
@@ -395,7 +399,7 @@ namespace Oxide.Plugins
 
         private void OnDispenserGather(ResourceDispenser dispenser, BasePlayer player, Item item)
         {
-            if (item == null || dispenser == null || !IsValid(player) || !hasRights(player.UserIDString))
+            if (item is null || dispenser is null || !IsValid(player) || !hasRights(player.UserIDString))
             {
                 return;
             }
@@ -408,7 +412,7 @@ namespace Oxide.Plugins
                 _ => null
             };
 
-            if (skill == null || !IsSkillEnabled(skill.Value))
+            if (skill is null || !IsSkillEnabled(skill.Value))
             {
                 return;
             }
@@ -434,7 +438,7 @@ namespace Oxide.Plugins
 
             int prevAmount = item.amount;
             bool isPowerTool = false;
-            
+
             if (skill != Skills.SKINNING && activeItem != null)
             {
                 HeldEntity heldEntity = activeItem.GetHeldEntity() as HeldEntity;
@@ -484,16 +488,14 @@ namespace Oxide.Plugins
 
         private void OnDispenserBonus(ResourceDispenser dispenser, BasePlayer player, Item item) => OnDispenserGather(dispenser, player, item);
 
-        private List<string> _warnings = new();
-
         private object OnCollectiblePickup(CollectibleEntity collectible, BasePlayer player)
         {
-            if (collectible == null || collectible.itemList.IsNullOrEmpty() || !IsValid(player) || !hasRights(player.UserIDString))
+            if (collectible is null || collectible.itemList.IsNullOrEmpty() || !IsValid(player) || !hasRights(player.UserIDString))
                 return null;
 
             var pi = GetPlayerInfo(player);
 
-            if (pi == null || !pi.ENABLED)
+            if (pi is null || !pi.ENABLED)
                 return null;
 
             if (config.functions.enabledCollectibleEntity.TryGetValue(collectible.ShortPrefabName, out var enabled) && !enabled)
@@ -504,8 +506,8 @@ namespace Oxide.Plugins
             for (int i = 0; i < collectible.itemList.Length; i++)
             {
                 ItemAmount itemAmount = collectible.itemList[i];
-                if (itemAmount == null) continue;
-                if (itemAmount.itemDef == null) continue;
+                if (itemAmount is null) continue;
+                if (itemAmount.itemDef is null) continue;
                 switch (itemAmount.itemDef.shortname)
                 {
                     case "black.berry":
@@ -619,7 +621,7 @@ namespace Oxide.Plugins
 
         private object OnGrowableGathered(GrowableEntity plant, Item item, BasePlayer player)
         {
-            if (item == null || player == null || !hasRights(player.UserIDString))
+            if (item is null || player is null || !hasRights(player.UserIDString))
             {
                 return true;
             }
@@ -759,14 +761,14 @@ namespace Oxide.Plugins
         }
         private object OnItemCraftFinished(ItemCraftTask task, Item item, ItemCrafter craft)
         {
-            if (task == null) return null;
+            if (task is null) return null;
             var crafter = craft?.owner;
-            if (crafter == null || !hasRights(crafter.UserIDString)) return null;
+            if (crafter is null || !hasRights(crafter.UserIDString)) return null;
             var bypassLevelRequirement = CanInstantCraftNoLevelRequirement(crafter);
             if (!bypassLevelRequirement && !IsSkillEnabled(Skills.CRAFTING)) return null;
             var pi = GetPlayerInfo(crafter);
             var xpPercentBefore = getExperiencePercent(pi, Skills.CRAFTING);
-            if (task.blueprint == null)
+            if (task.blueprint is null)
             {
                 Puts("There is problem obtaining task.blueprint on 'OnItemCraftFinished' hook! This is usually caused by some incompatable plugins.");
                 return null;
@@ -855,7 +857,7 @@ namespace Oxide.Plugins
                 user.Reply("Possible skills are: WC, M, S, A, C, *(All skills)");
                 _sb.Clear();
                 _sb.Append("Current points per hit:");
-                foreach (var currSkill in AllSkills)
+                foreach (var currSkill in _allSkills)
                 {
                     if (!IsSkillEnabled(currSkill)) continue;
                     _sb.Append($" {currSkill} > {pointsPerHitCurrent.Get(currSkill)} |");
@@ -881,14 +883,14 @@ namespace Oxide.Plugins
 
             if (skill == Skills.ALL)
             {
-                foreach (var currSkill in AllSkills)
+                foreach (var currSkill in _allSkills)
                 {
                     if (!IsSkillEnabled(currSkill)) continue;
                     pointsPerHitCurrent.Set(currSkill, points);
                 }
                 _sb.Clear();
                 _sb.Append("New points per hit:");
-                foreach (var currSkill in AllSkills)
+                foreach (var currSkill in _allSkills)
                 {
                     if (!IsSkillEnabled(currSkill)) continue;
                     _sb.Append($" {currSkill} > {pointsPerHitCurrent.Get(currSkill)} |");
@@ -900,7 +902,7 @@ namespace Oxide.Plugins
                 pointsPerHitCurrent.Set(skill, points);
                 _sb.Clear();
                 _sb.Append("New points per hit:");
-                foreach (var currSkill in AllSkills)
+                foreach (var currSkill in _allSkills)
                 {
                     if (!IsSkillEnabled(currSkill)) continue;
                     _sb.Append($" {currSkill} > {pointsPerHitCurrent.Get(currSkill)} |");
@@ -919,12 +921,12 @@ namespace Oxide.Plugins
                 return;
             }
             IPlayer target = covalence.Players.FindPlayer(args[0]);
-            if (target == null)
+            if (target is null)
             {
                 user.Reply(_("PLAYER NOT FOUND", user.Id));
                 return;
             }
-            if (!data.PlayerInfo.TryGetValue(Convert.ToUInt64(target.Id), out var playerData))
+            if (!_storedData.PlayerInfo.TryGetValue(ulong.Parse(target.Id), out var playerData))
             {
                 user.Reply("PlayerData is NULL!");
                 return;
@@ -940,8 +942,7 @@ namespace Oxide.Plugins
                 else user.Reply($"Current XP multiplier for player '{target.Name}' is {baseMultiplier}%");
                 return;
             }
-            double multiplier = -1;
-            if (double.TryParse(args[1], out multiplier))
+            if (double.TryParse(args[1], out double multiplier))
             {
                 if (multiplier <= 0)
                 {
@@ -973,12 +974,12 @@ namespace Oxide.Plugins
                 return;
             }
             IPlayer target = covalence.Players.FindPlayer(args[0]);
-            if (target == null)
+            if (target is null)
             {
                 user.Reply(_("PLAYER NOT FOUND", user.Id));
                 return;
             }
-            if (!data.PlayerInfo.TryGetValue(Convert.ToUInt64(target.Id), out var playerData))
+            if (!_storedData.PlayerInfo.TryGetValue(ulong.Parse(target.Id), out var playerData))
             {
                 user.Reply("PlayerData is NULL!");
                 return;
@@ -989,10 +990,10 @@ namespace Oxide.Plugins
         private bool GetLookingAtPlayer(IPlayer user)
         {
             BasePlayer player = user.Object as BasePlayer;
-            if (player == null) return false;
+            if (player is null) return false;
             BasePlayer target = RelationshipManager.GetLookingAtPlayer(player);
-            if (target == null) return false;
-            if (!data.PlayerInfo.TryGetValue(target.userID, out var playerData)) return false;
+            if (target is null) return false;
+            if (!_storedData.PlayerInfo.TryGetValue(target.userID, out var playerData)) return false;
             PrintInfo(user, target.UserIDString, target.displayName, playerData);
             return true;
         }
@@ -1050,12 +1051,12 @@ namespace Oxide.Plugins
             var playerName = args[0];
             IPlayer target = covalence.Players.FindPlayer(playerName);
 
-            if (playerName != "*" && playerName != "**" && target == null)
+            if (playerName != "*" && playerName != "**" && target is null)
             {
                 user.Reply(_("PLAYER NOT FOUND", user.Id));
                 return;
             }
-            if (playerName != "*" && playerName != "**" && !data.PlayerInfo.ContainsKey(Convert.ToUInt64(target.Id)))
+            if (playerName != "*" && playerName != "**" && !_storedData.PlayerInfo.ContainsKey(ulong.Parse(target.Id)))
             {
                 user.Reply("PlayerData is NULL!");
                 return;
@@ -1121,7 +1122,7 @@ namespace Oxide.Plugins
                         else if (playerMode == 2)
                             editMultiplierForPlayer(value);
                         else if (target != null)
-                            editMultiplierForPlayer(value, Convert.ToUInt64(target.Id));
+                            editMultiplierForPlayer(value, ulong.Parse(target.Id));
 
                         var whom = playerMode == 1 ? "ALL ONLINE PLAYERS" : playerMode == 2 ? "ALL PLAYERS" : target.Name;
                         user.Reply($"XP rates has changed to {value}% of normal XP for {whom}");
@@ -1138,7 +1139,7 @@ namespace Oxide.Plugins
                     {
                         foreach (var other in covalence.Players.All)
                         {
-                            if (data.PlayerInfo.ContainsKey(Convert.ToUInt64(other.Id)))
+                            if (_storedData.PlayerInfo.ContainsKey(ulong.Parse(other.Id)))
                             {
                                 adminModifyPlayerStats(user, skill, value, mode, other);
                             }
@@ -1159,7 +1160,7 @@ namespace Oxide.Plugins
             int count = 0;
             var pi = CreatePlayerInfo();
 
-            foreach (var info in data.PlayerInfo)
+            foreach (var info in _storedData.PlayerInfo)
             {
                 if (info.Value.IsDefault(pi))
                 {
@@ -1167,14 +1168,14 @@ namespace Oxide.Plugins
                 }
             }
 
-            user.Reply($"{count} / {data.PlayerInfo.Count} entries in datafile can be removed");
+            user.Reply($"{count} / {_storedData.PlayerInfo.Count} entries in datafile can be removed");
         }
 
         private void CleanCommand(IPlayer user, string command, string[] args)
         {
             if (!user.IsAdmin) return;
 
-            int count = data.PlayerInfo.Count;
+            int count = _storedData.PlayerInfo.Count;
             int cleaned = Clean();
 
             user.Reply($"{cleaned} / {count} entries in datafile have been removed");
@@ -1185,19 +1186,19 @@ namespace Oxide.Plugins
         {
             int count = 0;
 
-            if (data == null)
+            if (_storedData is null)
             {
                 return count;
             }
 
             var pi = CreatePlayerInfo();
 
-            foreach (var info in data.PlayerInfo.ToList())
+            foreach (var info in _storedData.PlayerInfo.ToList())
             {
                 if (info.Value.IsDefault(pi))
                 {
                     count++;
-                    data.PlayerInfo.Remove(info.Key);
+                    _storedData.PlayerInfo.Remove(info.Key);
                 }
             }
 
@@ -1241,7 +1242,7 @@ namespace Oxide.Plugins
             }
             _sb.Clear();
             _sb.AppendLine("<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>");
-            foreach (Skills skill in AllSkills) _sb.Append(getStatPrint(player, skill));
+            foreach (Skills skill in _allSkills) _sb.Append(getStatPrint(player, skill));
             var pi = GetPlayerInfo(player.userID);
             var alive = ReadableTimeSpan(DateTime.UtcNow - ToDateTimeFromEpoch(pi.LAST_DEATH));
             _sb.AppendLine().AppendLine($"Time alive: {alive}");
@@ -1448,18 +1449,18 @@ namespace Oxide.Plugins
             Subscribe(nameof(OnEntityKill));
             Subscribe(nameof(Unload));
 
-            timer.Repeat(300f, 0, SaveData);
+            _timer = timer.Repeat(300f, 0, SaveData);
         }
 
         private void CheckCollectible()
         {
             var collectList = Resources.FindObjectsOfTypeAll<CollectibleEntity>().Select(c => c.ShortPrefabName).Distinct().ToList();
-            if (collectList == null || collectList.Count == 0)
+            if (collectList is null || collectList.Count == 0)
             {
                 return;
             }
 
-            if (config.functions.enabledCollectibleEntity == null)
+            if (config.functions.enabledCollectibleEntity is null)
             {
                 config.functions.enabledCollectibleEntity = new();
             }
@@ -1482,9 +1483,9 @@ namespace Oxide.Plugins
 
         private void SaveData()
         {
-            if (data != null)
+            if (_storedData != null)
             {
-                Interface.Oxide.DataFileSystem.WriteObject(Name, data);
+                Interface.Oxide.DataFileSystem.WriteObject(Name, _storedData);
             }
         }
 
@@ -1508,13 +1509,13 @@ namespace Oxide.Plugins
                 Puts(ex.ToString());
             }
 
-            if (_craftData == null)
+            if (_craftData is null)
             {
                 Puts("Crafting data is null and has been reset!");
                 _craftData = new();
             }
 
-            if (_craftData.CraftList == null)
+            if (_craftData.CraftList is null)
             {
                 Puts("Crafting list is null and has been reset!");
                 _craftData.CraftList = new();
@@ -1529,7 +1530,7 @@ namespace Oxide.Plugins
 
             try
             {
-                data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
+                _storedData = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
             }
             catch (Exception ex)
             {
@@ -1537,10 +1538,10 @@ namespace Oxide.Plugins
                 Puts(ex.ToString());
             }
 
-            if (data == null || data.PlayerInfo == null)
+            if (_storedData is null || _storedData.PlayerInfo is null)
             {
                 Puts("Data is null, resetting to defaults!");
-                data = new();
+                _storedData = new();
             }
             else if (newSaveDetected)
             {
@@ -1553,16 +1554,16 @@ namespace Oxide.Plugins
         {
             if (string.IsNullOrEmpty(config.generic.nowipe))
             {
-                data = new();
+                _storedData = new();
                 return;
             }
-            foreach (var pair in data.PlayerInfo.ToList())
+            foreach (var pair in _storedData.PlayerInfo.ToList())
             {
                 if (permission.UserHasPermission(pair.Key.ToString(), config.generic.nowipe))
                 {
                     continue;
                 }
-                data.PlayerInfo.Remove(pair.Key);
+                _storedData.PlayerInfo.Remove(pair.Key);
             }
         }
 
@@ -1575,23 +1576,23 @@ namespace Oxide.Plugins
         {
             if (userID == ulong.MinValue)
             {
-                foreach (var p in data.PlayerInfo.ToList())
-                    data.PlayerInfo[p.Key].XP_MULTIPLIER = multiplier;
+                foreach (var p in _storedData.PlayerInfo.ToList())
+                    _storedData.PlayerInfo[p.Key].XP_MULTIPLIER = multiplier;
                 return;
             }
-            if (data.PlayerInfo.TryGetValue(userID, out var playerData))
+            if (_storedData.PlayerInfo.TryGetValue(userID, out var playerData))
                 playerData.XP_MULTIPLIER = multiplier;
         }
 
         private void adminModifyPlayerStats(IPlayer user, Skills skill, double level, int mode, IPlayer target)
         {
-            var id = Convert.ToUInt64(target.Id);
+            var id = ulong.Parse(target.Id);
             var pi = GetPlayerInfo(id);
 
             if (skill == Skills.ALL)
             {
                 _sb.Clear();
-                foreach (var currSkill in AllSkills)
+                foreach (var currSkill in _allSkills)
                 {
                     if (!IsSkillEnabled(currSkill)) continue;
                     var modifiedLevel = getLevel(pi, currSkill);
@@ -1942,7 +1943,7 @@ namespace Oxide.Plugins
 
         private bool isZoneExcluded(BasePlayer player)
         {
-            if (config.settings.zones.Count == 0 || ZoneManager == null)
+            if (config.settings.zones.Count == 0 || ZoneManager is null)
             {
                 return false;
             }
@@ -1990,7 +1991,7 @@ namespace Oxide.Plugins
 
         private ItemDefinition GetItem(string shortname)
         {
-            if (string.IsNullOrEmpty(shortname) || CraftItems == null) return null;
+            if (string.IsNullOrEmpty(shortname) || CraftItems is null) return null;
             if (CraftItems.TryGetValue(shortname, out var item)) return item;
             return null;
         }
@@ -2199,7 +2200,7 @@ namespace Oxide.Plugins
 
         private void CreateGUI(BasePlayer player, PlayerInfo pi)
         {
-            if (!config.cui.cuiEnabled || pi == null || !pi.ENABLED || !pi.CUI || !hasRights(player.UserIDString) || !player.IsAlive() || player.IsSleeping())
+            if (!config.cui.cuiEnabled || pi is null || !pi.ENABLED || !pi.CUI || !hasRights(player.UserIDString) || !player.IsAlive() || player.IsSleeping())
             {
                 return;
             }
@@ -2220,7 +2221,7 @@ namespace Oxide.Plugins
                 }
             };
             CuiHelper.AddUi(player, mainContainer);
-            foreach (Skills skill in AllSkills)
+            foreach (Skills skill in _allSkills)
                 if (IsSkillEnabled(skill))
                     GUIUpdateSkill(player, skill);
         }
@@ -2255,9 +2256,9 @@ namespace Oxide.Plugins
 
         private PlayerInfo GetPlayerInfo(ulong userID)
         {
-            if (!data.PlayerInfo.TryGetValue(userID, out var pi))
+            if (!_storedData.PlayerInfo.TryGetValue(userID, out var pi))
             {
-                data.PlayerInfo[userID] = pi = CreatePlayerInfo();
+                _storedData.PlayerInfo[userID] = pi = CreatePlayerInfo();
 
                 pi.LAST_DEATH = ToEpochTime(DateTime.UtcNow);
                 pi.CUI = config.generic.playerCuiDefaultEnabled;
@@ -2851,12 +2852,12 @@ namespace Oxide.Plugins
         }
 
         private Configuration config = new();
-        private ConfigurationResources pointsPerPowerTool;
+        private readonly ConfigurationResources pointsPerPowerTool;
         private ConfigurationResources pointsPerHitCurrent;
-        private ConfigurationResources pointsPerPowerToolAtNight;
+        private readonly ConfigurationResources pointsPerPowerToolAtNight;
         private ConfigurationResources pointsPerHitPowerToolCurrent;
         private ConfigurationResources resourceMultipliersCurrent;
-        private Dictionary<Skills, int> skillIndex = new();
+        private readonly Dictionary<Skills, int> skillIndex = new();
 
         protected override void LoadConfig()
         {
@@ -2865,7 +2866,7 @@ namespace Oxide.Plugins
             try
             {
                 config = Config.ReadObject<Configuration>();
-                if (config == null) LoadDefaultConfig();
+                if (config is null) LoadDefaultConfig();
                 canSaveConfig = true;
             }
             catch (Exception ex)
@@ -3011,7 +3012,7 @@ namespace Oxide.Plugins
 
         private double GetLevel(ulong userID, string skill = "A")
         {
-            if (data.PlayerInfo.TryGetValue(userID, out var pi))
+            if (_storedData.PlayerInfo.TryGetValue(userID, out var pi))
             {
                 switch (skill.ToUpper())
                 {
@@ -3041,7 +3042,7 @@ namespace Oxide.Plugins
             if (playerid != 0)
             {
                 PlayerInfo pi = GetPlayerInfo(playerid);
-                if (pi == null) return string.Empty;
+                if (pi is null) return string.Empty;
                 return pi.ACQUIRE_LEVEL + "|" +
                     pi.ACQUIRE_POINTS + "|" +
                     pi.CRAFTING_LEVEL + "|" +
@@ -3062,10 +3063,10 @@ namespace Oxide.Plugins
 
         private bool api_SetPlayerInfo(ulong userid, string data)
         {
-            if (userid == 0 || data == null) { return false; }
-            if (!this.data.PlayerInfo.TryGetValue(userid, out var pi))
+            if (userid == 0 || data is null) { return false; }
+            if (!_storedData.PlayerInfo.TryGetValue(userid, out var pi))
             {
-                this.data.PlayerInfo[userid] = pi = CreatePlayerInfo();
+                _storedData.PlayerInfo[userid] = pi = CreatePlayerInfo();
                 pi.LAST_DEATH = ToEpochTime(DateTime.UtcNow);
                 pi.CUI = config.generic.playerCuiDefaultEnabled;
                 pi.ENABLED = config.generic.playerPluginDefaultEnabled;
