@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using Oxide.Core;
@@ -9,39 +10,34 @@ using Oxide.Game.Rust.Cui;
 using UnityEngine;
 using Newtonsoft.Json;
 using Rust;
+using Newtonsoft.Json.Converters;
 
 namespace Oxide.Plugins
 {
-    [Info("ZLevels Remastered", "nivex", "3.2.2")]
-    [Description("Lets players level up as they harvest different resources and when crafting")]
+    [Info("ZLevels Remastered", "nivex", "3.3.1")]
+    [Description("Lets players level up as they harvest resources, fish, and craft")]
 
-    public class ZLevelsRemastered : RustPlugin
+    class ZLevelsRemastered : RustPlugin
     {
-        [PluginReference] readonly Plugin EventManager, CraftingController, ZoneManager, Economics, IQEconomic, ServerRewards, SkillTree;
+        [PluginReference]
+        Plugin EventManager, CraftingController, ZoneManager, Economics, IQEconomic, ServerRewards, SkillTree;
 
-        const int MaxB = 10001;
-        const int MinB = 10;
-
-        private readonly Skills[] _allSkills = new Skills[] { Skills.ACQUIRE, Skills.CRAFTING, Skills.MINING, Skills.SKINNING, Skills.WOODCUTTING };
-        private readonly StringBuilder _sb = new();
-        private readonly List<string> _warnings = new();
-
-        private bool bonusOn;
-        private bool newSaveDetected;
-        private CraftData _craftData;
+        private StoredData data = new();
         private Dictionary<string, ItemDefinition> CraftItems;
-        private StoredData _storedData;
-        private Timer _timer;
+        private CraftData _craftData = new();
+        private StringBuilder _sb = new();
+        private bool newSaveDetected;
+        private bool bonusOn;
+        private int MaxB = 10001;
+        private int MinB = 10;
+        private HashSet<ulong> uiMovePlayers = new();
 
-        public enum Skills
-        {
-            ACQUIRE,
-            CRAFTING,
-            MINING,
-            SKINNING,
-            WOODCUTTING,
-            ALL
-        }
+        public enum Skills { ACQUIRE, CRAFTING, MINING, SKINNING, WOODCUTTING, FISHING, ALL }
+
+        [JsonConverter(typeof(StringEnumConverter))]
+        public enum ClientPanels { None, Overall, Overlay, OverlayNonScaled, HudMenu, Hud, Contacts, Clans, Crafting, Inventory, Map, TechTree, Under, UnderNonScaled }
+
+        private Skills[] AllSkills = new Skills[] { Skills.ACQUIRE, Skills.CRAFTING, Skills.MINING, Skills.SKINNING, Skills.WOODCUTTING, Skills.FISHING };
 
         private class CraftData
         {
@@ -61,23 +57,9 @@ namespace Oxide.Plugins
         private class StoredData
         {
             public Hash<ulong, PlayerInfo> PlayerInfo = new();
+            [JsonProperty(ItemConverterType = typeof(Vector2Converter))]
+            public Dictionary<ulong, Vector2> UiPositions = new();
             public StoredData() { }
-        }
-
-        private enum LevelType
-        {
-            ACQUIRE_LEVEL,
-            ACQUIRE_POINTS,
-            CRAFTING_LEVEL,
-            CRAFTING_POINTS,
-            MINING_LEVEL,
-            MINING_POINTS,
-            WOODCUTTING_LEVEL,
-            WOODCUTTING_POINTS,
-            SKINNING_LEVEL,
-            SKINNING_POINTS,
-            LAST_DEATH,
-            XP_MULTIPLIER,
         }
 
         private class PlayerInfo : IEquatable<PlayerInfo>
@@ -92,6 +74,8 @@ namespace Oxide.Plugins
             private double _skinningPoints = 10.0;
             private double _woodcuttingLevel = 1.0;
             private double _woodcuttingPoints = 10.0;
+            private double _fishingLevel = 1.0;
+            private double _fishingPoints = 10.0;
             private double _lastDeath = 0.0;
             private double _xpMultiplier = 100.0;
 
@@ -167,6 +151,20 @@ namespace Oxide.Plugins
                 set => _woodcuttingPoints = RoundValue(value);
             }
 
+            [JsonProperty(PropertyName = "FL")]
+            public double FISHING_LEVEL
+            {
+                get => RoundValue(_fishingLevel);
+                set => _fishingLevel = RoundValue(value);
+            }
+
+            [JsonProperty(PropertyName = "FP")]
+            public double FISHING_POINTS
+            {
+                get => RoundValue(_fishingPoints);
+                set => _fishingPoints = RoundValue(value);
+            }
+
             [JsonProperty(PropertyName = "LD")]
             public double LAST_DEATH
             {
@@ -182,16 +180,19 @@ namespace Oxide.Plugins
             }
 
             [JsonProperty(PropertyName = "CUI")]
-            public bool CUI { get; set; } = true;
+            public bool CUI = true;
+
+            [JsonProperty(PropertyName = "CUIMOVE")]
+            public bool CUIMOVE;
 
             [JsonProperty(PropertyName = "ONOFF")]
-            public bool ENABLED { get; set; } = true;
+            public bool ENABLED = true;
 
             public PlayerInfo() { }
 
             public bool Equals(PlayerInfo other)
             {
-                if (other is null)
+                if (other == null)
                     return false;
 
                 return ACQUIRE_LEVEL == other.ACQUIRE_LEVEL &&
@@ -204,8 +205,11 @@ namespace Oxide.Plugins
                        SKINNING_POINTS == other.SKINNING_POINTS &&
                        WOODCUTTING_LEVEL == other.WOODCUTTING_LEVEL &&
                        WOODCUTTING_POINTS == other.WOODCUTTING_POINTS &&
+                       FISHING_LEVEL == other.FISHING_LEVEL &&
+                       FISHING_POINTS == other.FISHING_POINTS &&
                        XP_MULTIPLIER == other.XP_MULTIPLIER &&
                        CUI == other.CUI &&
+                       CUIMOVE == other.CUIMOVE &&
                        ENABLED == other.ENABLED;
             }
 
@@ -227,8 +231,11 @@ namespace Oxide.Plugins
                 hash.Add(SKINNING_POINTS);
                 hash.Add(WOODCUTTING_LEVEL);
                 hash.Add(WOODCUTTING_POINTS);
+                hash.Add(FISHING_LEVEL);
+                hash.Add(FISHING_POINTS);
                 hash.Add(XP_MULTIPLIER);
                 hash.Add(CUI);
+                hash.Add(CUIMOVE);
                 hash.Add(ENABLED);
                 return hash.ToHashCode();
             }
@@ -261,7 +268,7 @@ namespace Oxide.Plugins
 
             int index = 0;
 
-            foreach (Skills skill in _allSkills)
+            foreach (Skills skill in AllSkills)
             {
                 if (IsSkillEnabled(skill))
                 {
@@ -272,8 +279,6 @@ namespace Oxide.Plugins
 
         private void Unload()
         {
-            _timer?.Destroy();
-            _timer = null;
             Clean();
             SaveData();
             foreach (var player in BasePlayer.activePlayerList)
@@ -285,6 +290,14 @@ namespace Oxide.Plugins
                 TOD_Sky.Instance.Components.Time.OnSunrise -= OnTimeSunrise;
                 TOD_Sky.Instance.Components.Time.OnSunset -= OnTimeSunset;
             }
+        }
+
+        protected new void Puts(string format, params object[] args)
+        {
+            if (string.IsNullOrWhiteSpace(format)) return;
+            string message = Localize(format, null, args);
+            if (string.IsNullOrWhiteSpace(message)) return;
+            Interface.Oxide.LogInfo("[{0}] {1}", nameof(ZLevelsRemastered), message);
         }
 
         private void OnNewSave(string strFilename)
@@ -316,7 +329,7 @@ namespace Oxide.Plugins
             foreach (var player in BasePlayer.allPlayerList)
             {
                 var pi = GetPlayerInfo(player);
-                if (player.IsConnected) CreateGUI(player, pi);
+                if (pi != null && player.IsConnected) CreateGUI(player, pi);
             }
 
             Puts("Stats can be reset by > zl.reset <");
@@ -327,7 +340,11 @@ namespace Oxide.Plugins
 
         private void OnPlayerConnected(BasePlayer player) => OnPlayerSleepEnded(player);
 
-        private void OnPlayerDisconnected(BasePlayer player) => GetPlayerInfo(player);
+        private void OnPlayerDisconnected(BasePlayer player)
+        {
+            if (!ReferenceEquals(player, null)) uiMovePlayers.Remove(player.userID);
+            if (player != null) GetPlayerInfo(player);
+        }
 
         private void OnEntityKill(BasePlayer player) => OnPlayerSleep(player);
 
@@ -337,45 +354,32 @@ namespace Oxide.Plugins
 
         private void OnPlayerSleep(BasePlayer player) => DestroyGUI(player);
 
-        private void OnEntityDeath(BasePlayer player, HitInfo hitInfo)
+        private void OnEntityDeath(BasePlayer player, HitInfo info)
         {
-            if (hitInfo is null || !IsValid(player) || isZoneExcluded(player))
-            {
+            if (info == null || !IsValid(player) || isZoneExcluded(player))
                 return;
-            }
 
             DestroyGUI(player);
 
             if (!hasRights(player.UserIDString))
-            {
                 return;
-            }
 
             var pi = GetPlayerInfo(player);
-
             if (!pi.ENABLED || permission.UserHasPermission(player.UserIDString, config.generic.permissionNameXP))
-            {
                 return;
-            }
 
-            bool isSuicide = hitInfo.damageTypes.Has(DamageType.Suicide) && (player.IsAdmin || player.IsDeveloper || !player.CanSuicide());
+            string L(string key, params object[] args) => Localize(key, player.UserIDString, args);
+
+            bool isSuicide = info.damageTypes.Has(DamageType.Suicide) && (player.IsAdmin || player.IsDeveloper || !player.CanSuicide());
 
             if (!config.generic.penaltyOnSuicide && isSuicide) return;
             if (!config.generic.penaltyOnDeath && !isSuicide) return;
-
-            if (EventManager?.Call("IsEventPlayer", player) != null)
-            {
-                return;
-            }
-
-            if (Interface.CallHook("CanBePenalized", player) != null)
-            {
-                return;
-            }
+            if (EventManager?.Call("IsEventPlayer", player) != null) return;
+            if (Interface.CallHook("CanBePenalized", player) != null) return;
 
             _sb.Clear();
 
-            foreach (Skills skill in _allSkills)
+            foreach (Skills skill in AllSkills)
             {
                 if (IsSkillEnabled(skill))
                 {
@@ -383,7 +387,7 @@ namespace Oxide.Plugins
 
                     if (penalty > 0)
                     {
-                        _sb.AppendLine("* -" + penalty + " " + _(skill + "Skill") + " XP.");
+                        _sb.AppendLine(L("* -{0} {1} XP.", penalty, L(skill + "Skill")));
                         removePoints(pi, skill, penalty);
                     }
                 }
@@ -399,10 +403,8 @@ namespace Oxide.Plugins
 
         private void OnDispenserGather(ResourceDispenser dispenser, BasePlayer player, Item item)
         {
-            if (item is null || dispenser is null || !IsValid(player) || !hasRights(player.UserIDString))
-            {
+            if (item == null || dispenser == null || !hasRights(player))
                 return;
-            }
 
             Skills? skill = dispenser.gatherType switch
             {
@@ -412,29 +414,20 @@ namespace Oxide.Plugins
                 _ => null
             };
 
-            if (skill is null || !IsSkillEnabled(skill.Value))
-            {
+            if (skill == null || !IsSkillEnabled(skill.Value))
                 return;
-            }
 
             var pi = GetPlayerInfo(player);
-
             if (!pi.ENABLED)
-            {
                 return;
-            }
 
             Item activeItem = player.GetActiveItem();
 
             if (permission.UserHasPermission(player.UserIDString, config.generic.BlockWeaponsGather) && activeItem?.info.category == ItemCategory.Weapon)
-            {
                 return;
-            }
 
             if (!config.functions.ShouldAllowGather(item.info.shortname, out bool grantXPOnly))
-            {
                 return;
-            }
 
             int prevAmount = item.amount;
             bool isPowerTool = false;
@@ -490,94 +483,110 @@ namespace Oxide.Plugins
 
         private object OnCollectiblePickup(CollectibleEntity collectible, BasePlayer player)
         {
-            if (collectible is null || collectible.itemList.IsNullOrEmpty() || !IsValid(player) || !hasRights(player.UserIDString))
+            if (collectible == null || collectible.itemList.IsNullOrEmpty() || !hasRights(player))
                 return null;
 
             var pi = GetPlayerInfo(player);
-
-            if (pi is null || !pi.ENABLED)
+            if (!pi.ENABLED)
                 return null;
 
             if (config.functions.enabledCollectibleEntity.TryGetValue(collectible.ShortPrefabName, out var enabled) && !enabled)
                 return null;
 
-            Skills skill;
-
             for (int i = 0; i < collectible.itemList.Length; i++)
             {
                 ItemAmount itemAmount = collectible.itemList[i];
-                if (itemAmount is null) continue;
-                if (itemAmount.itemDef is null) continue;
-                switch (itemAmount.itemDef.shortname)
-                {
-                    case "black.berry":
-                    case "blue.berry":
-                    case "bone.fragments":
-                    case "clone.seed":
-                    case "clone.orchid":
-                    case "clone.rose":
-                    case "clone.sunflower":
-                    case "cloth":
-                    case "corn":
-                    case "diesel_barrel":
-                    case "green.berry":
-                    case "mushroom":
-                    case "orchid":
-                    case "potato":
-                    case "pumpkin":
-                    case "red.berry":
-                    case "rose":
-                    case "seed.black.berry":
-                    case "seed.blue.berry":
-                    case "seed.corn":
-                    case "seed.green.berry":
-                    case "seed.hemp":
-                    case "seed.orchid":
-                    case "seed.potato":
-                    case "seed.pumpkin":
-                    case "seed.red.berry":
-                    case "seed.rose":
-                    case "seed.sunflower":
-                    case "seed.wheat":
-                    case "seed.white.berry":
-                    case "seed.yellow.berry":
-                    case "sunflower":
-                    case "wheat":
-                    case "white.berry":
-                    case "yellow.berry":
-                        skill = IsSkillEnabled(Skills.ACQUIRE) ? Skills.ACQUIRE : Skills.SKINNING;
-                        break;
-                    case "metal.ore":
-                    case "sulfur.ore":
-                    case "stones":
-                        skill = config.settings.MiningStonesOre ? Skills.MINING : Skills.ACQUIRE;
-                        break;
-                    case "wood":
-                        skill = config.settings.AcquireWood ? Skills.ACQUIRE : Skills.WOODCUTTING;
-                        break;
-                    default:
-                        if (IsSkillEnabled(Skills.ACQUIRE)) skill = Skills.ACQUIRE;
-                        else if (IsSkillEnabled(Skills.SKINNING)) skill = Skills.SKINNING;
-                        else return null;
-                        if (!_warnings.Contains(itemAmount.itemDef.shortname))
-                        {
-                            PrintWarning($"WARNING: {player} picked up undefined item: {itemAmount.itemDef.shortname}. Defaulting to {skill} skill.");
-                            _warnings.Add(itemAmount.itemDef.shortname);
-                        }
-                        break;
-                }
+                if (itemAmount?.itemDef?.shortname == null || !TryGetCollectibleSkill(itemAmount.itemDef.shortname, player, out Skills skill))
+                    continue;
 
-                if (IsSkillEnabled(skill))
+                int prevAmount = (int)itemAmount.amount;
+                itemAmount.amount = levelHandler(pi, player, prevAmount, skill, collectible);
+                if (Interface.CallHook("OnZLevelCollectiblePickup", itemAmount, player, collectible, prevAmount, itemAmount.amount) != null)
                 {
-                    int prevAmount = (int)itemAmount.amount;
-                    itemAmount.amount = levelHandler(pi, player, prevAmount, skill, collectible);
-                    if (Interface.CallHook("OnZLevelCollectiblePickup", itemAmount, player, collectible, prevAmount, itemAmount.amount) != null)
-                    {
-                        return true;
-                    }
+                    return true;
                 }
             }
+
             return null;
+        }
+
+        private void OnCollectiblePickedup(CollectibleEntity collectible, BasePlayer player, Item item)
+        {
+            if (collectible == null || item?.info?.shortname == null || !hasRights(player))
+                return;
+
+            var pi = GetPlayerInfo(player);
+            if (!pi.ENABLED)
+                return;
+
+            if (config.functions.enabledCollectibleEntity.TryGetValue(collectible.ShortPrefabName, out var enabled) && !enabled)
+                return;
+
+            if (!TryGetCollectibleSkill(item.info.shortname, player, out Skills skill))
+                return;
+
+            int prevAmount = item.amount;
+            item.amount = levelHandler(pi, player, item.amount, skill, collectible);
+            Interface.CallHook("OnZLevelCollectiblePickedup", item, player, collectible, prevAmount, item.amount);
+        }
+
+        private bool TryGetCollectibleSkill(string shortname, BasePlayer player, out Skills skill)
+        {
+            switch (shortname)
+            {
+                case "black.berry" or "blue.berry" or "bone.fragments" or "clone.seed" or "clone.orchid" or "clone.rose" or "clone.sunflower" or "cloth" or "corn" or "diesel_barrel" or "green.berry" or "mushroom" or "orchid" or "potato" or "pumpkin" or "red.berry" or "rose" or "seed.black.berry" or "seed.blue.berry" or "seed.corn" or "seed.green.berry" or "seed.hemp" or "seed.orchid" or "seed.potato" or "seed.pumpkin" or "seed.red.berry" or "seed.rose" or "seed.sunflower" or "seed.wheat" or "seed.white.berry" or "seed.yellow.berry" or "sunflower" or "wheat" or "white.berry" or "yellow.berry":
+                    skill = IsSkillEnabled(Skills.ACQUIRE) ? Skills.ACQUIRE : Skills.SKINNING;
+                    break;
+                case "hq.metal.ore" or "metal.ore" or "sulfur.ore" or "stones":
+                    skill = config.settings.MiningStonesOre ? Skills.MINING : Skills.ACQUIRE;
+                    break;
+                case "wood":
+                    skill = config.settings.AcquireWood ? Skills.ACQUIRE : Skills.WOODCUTTING;
+                    break;
+                default:
+                    if (IsSkillEnabled(Skills.ACQUIRE)) skill = Skills.ACQUIRE;
+                    else if (IsSkillEnabled(Skills.SKINNING)) skill = Skills.SKINNING;
+                    else
+                    {
+                        skill = default;
+                        return false;
+                    }
+
+                    if (_warnings.Add(shortname))
+                    {
+                        Puts("WARNING: {0} picked up undefined item: {1}. Defaulting to {2} skill.", player, shortname, Localize(skill + "Skill"));
+                    }
+                    break;
+            }
+
+            return IsSkillEnabled(skill);
+        }
+
+        private HashSet<string> _warnings = new();
+
+        private void OnFishCatch(Item item, BaseFishingRod rod, BasePlayer player)
+        {
+            if (item?.info == null || rod == null || !hasRights(player) || !IsSkillEnabled(Skills.FISHING))
+                return;
+
+            var pi = GetPlayerInfo(player);
+            if (!pi.ENABLED)
+                return;
+
+            double level = getLevel(pi, Skills.FISHING);
+            if (!TryGainXP(pi, player, Skills.FISHING, rod, config.settings.fishingDetails.xpPerCatch))
+                return;
+
+            int prevAmount = item.amount;
+            bool actualFish = TryGetFishable(item.info, out ItemModFishable fishable) && !fishable.IsJunk;
+            double chance = GetFishingBonusChance(level);
+            bool extraFish = actualFish && (chance >= 100.0 || chance > 0.0 && UnityEngine.Random.Range(0f, 100f) < chance);
+            if (extraFish)
+            {
+                item.amount++;
+            }
+
+            Interface.CallHook("OnZLevelFishCatch", item, rod, player, prevAmount, item.amount, extraFish);
         }
 
         private void OnTimeSunset()
@@ -621,17 +630,12 @@ namespace Oxide.Plugins
 
         private object OnGrowableGathered(GrowableEntity plant, Item item, BasePlayer player)
         {
-            if (item is null || player is null || !hasRights(player.UserIDString))
-            {
+            if (item == null || !hasRights(player))
                 return true;
-            }
 
             var pi = GetPlayerInfo(player);
-
             if (!pi.ENABLED)
-            {
                 return true;
-            }
 
             Skills skill;
             if (IsSkillEnabled(Skills.ACQUIRE))
@@ -650,10 +654,9 @@ namespace Oxide.Plugins
 
         private object OnItemCraft(ItemCraftTask task, BasePlayer crafter, Item fromTempBlueprint)
         {
-            if (!hasRights(crafter.UserIDString)) return null;
+            if (!hasRights(crafter)) return null;
 
             var pi = GetPlayerInfo(crafter);
-
             if (!pi.ENABLED) return null;
 
             var bypassCraftLevelRequirement = CanInstantCraftNoLevelRequirement(crafter);
@@ -761,14 +764,14 @@ namespace Oxide.Plugins
         }
         private object OnItemCraftFinished(ItemCraftTask task, Item item, ItemCrafter craft)
         {
-            if (task is null) return null;
+            if (task == null) return null;
             var crafter = craft?.owner;
-            if (crafter is null || !hasRights(crafter.UserIDString)) return null;
+            if (crafter == null || !hasRights(crafter.UserIDString)) return null;
             var bypassLevelRequirement = CanInstantCraftNoLevelRequirement(crafter);
             if (!bypassLevelRequirement && !IsSkillEnabled(Skills.CRAFTING)) return null;
             var pi = GetPlayerInfo(crafter);
             var xpPercentBefore = getExperiencePercent(pi, Skills.CRAFTING);
-            if (task.blueprint is null)
+            if (task.blueprint == null)
             {
                 Puts("There is problem obtaining task.blueprint on 'OnItemCraftFinished' hook! This is usually caused by some incompatable plugins.");
                 return null;
@@ -787,8 +790,8 @@ namespace Oxide.Plugins
                 if (!maxLevel)
                 {
                     Level = getPointsLevel(Points, Skills.CRAFTING);
-                    string format = $"<color={config.settings.colors.CRAFTING}>{_("LevelUpText", crafter.UserIDString)}</color>";
-                    string message = string.Format(format, _("CRAFTINGSkill", crafter.UserIDString), Level, Points, getLevelPoints(Level + 1), pi.CRAFTING_LEVEL * Convert.ToDouble(config.settings.craftingDetails.percent));
+                    string format = $"<color={config.settings.colors.CRAFTING}>{Localize("LevelUpText", crafter.UserIDString)}</color>";
+                    string message = string.Format(format, Localize("CRAFTINGSkill", crafter.UserIDString), Level, Points, getLevelPoints(Level + 1), pi.CRAFTING_LEVEL * Convert.ToDouble(config.settings.craftingDetails.percent));
                     Player.Message(crafter, message, string.IsNullOrEmpty(config.generic.pluginPrefix) ? string.Empty : config.generic.pluginPrefix, config.generic.steamIDIcon);
                     GiveReward(crafter, Skills.CRAFTING, Level);
                     if (config.generic.enableLevelupBroadcast)
@@ -797,7 +800,7 @@ namespace Oxide.Plugins
                         {
                             if (target != null && target.userID != crafter.userID && hasRights(target.UserIDString) && GetPlayerInfo(target).ENABLED)
                             {
-                                Message(target, "LevelUpTextBroadcast", crafter.displayName, Level, config.settings.colors.CRAFTING, _("CRAFTINGSkill", crafter.UserIDString));
+                                Message(target, "LevelUpTextBroadcast", crafter.displayName, Level, config.settings.colors.CRAFTING, Localize("CRAFTINGSkill", target.UserIDString));
                             }
                         }
                     }
@@ -837,37 +840,42 @@ namespace Oxide.Plugins
         [HookMethod("SendHelpText"), ChatCommand("stathelp")]
         private void SendHelpText(BasePlayer player)
         {
+            string L(string key) => Localize(key, player.UserIDString);
             _sb.Clear();
-            _sb.AppendLine("<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>");
-            _sb.AppendLine("/stats - Displays your stats.");
-            _sb.AppendLine("/statsui - Enable/Disable stats UI.");
-            _sb.AppendLine("/statsonoff - Enable/Disable whole leveling.");
-            _sb.AppendLine("/statinfo - Displays information about skills.");
-            _sb.AppendLine("/stathelp - Displays the help.");
+            _sb.AppendLine(L("<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>"));
+            _sb.AppendLine(L("/stats - Displays your stats."));
+            _sb.AppendLine(L("/statsui - Enable/Disable stats UI. Use /statsui reset to restore its position."));
+            _sb.AppendLine(L("/statsui move - Start/finish moving the UI, or click DONE to finish moving the UI. /statsui button - Show/hide the move button."));
+            _sb.AppendLine(L("/statsonoff - Enable/Disable whole leveling."));
+            _sb.AppendLine(L("/statinfo - Displays information about skills."));
+            _sb.AppendLine(L("/stathelp - Displays the help."));
             //sb.AppendLine("/topskills - Display max levels reached so far.");
-            SendReply(player, _sb.ToString());
+            if (_sb.Length > 0) SendReply(player, _sb.ToString());
         }
 
         private void PointsPerHitCommand(IPlayer user, string command, string[] args)
         {
             if (!user.IsAdmin) return;
+
+            string L(string key, params object[] args) => Localize(key, user.Id, args);
+
             if (args.Length < 2)
             {
-                user.Reply("Syntax: zl.pointsperhit skill number");
-                user.Reply("Possible skills are: WC, M, S, A, C, *(All skills)");
+                Reply(user, "Syntax: zl.pointsperhit skill number");
+                Reply(user, "Possible skills are: WC, M, S, A, C, *(All skills)");
                 _sb.Clear();
-                _sb.Append("Current points per hit:");
-                foreach (var currSkill in _allSkills)
+                _sb.Append(L("Current points per hit:"));
+                foreach (var currSkill in AllSkills)
                 {
-                    if (!IsSkillEnabled(currSkill)) continue;
-                    _sb.Append($" {currSkill} > {pointsPerHitCurrent.Get(currSkill)} |");
+                    if (currSkill == Skills.FISHING || !IsSkillEnabled(currSkill)) continue;
+                    _sb.Append(L(" {0} > {1} |", L(currSkill + "Skill"), pointsPerHitCurrent.Get(currSkill)));
                 }
                 user.Reply(_sb.ToString().TrimEnd('|'));
                 return;
             }
             if (!double.TryParse(args[1], out var points) || points < 1)
             {
-                user.Reply("Incorrect number. Must be greater than or equal to 1");
+                Reply(user, "Incorrect number. Must be greater than or equal to 1");
                 return;
             }
 
@@ -879,21 +887,21 @@ namespace Oxide.Plugins
             else if (skillName.Equals("M")) skill = Skills.MINING;
             else if (skillName.Equals("A")) skill = Skills.ACQUIRE;
             else if (skillName.Equals("S")) skill = Skills.SKINNING;
-            else { user.Reply("Incorrect skill. Possible skills are: WC, M, S, A, C, *(All skills)."); return; }
+            else { Reply(user, "Incorrect skill. Possible skills are: WC, M, S, A, C, *(All skills)."); return; }
 
             if (skill == Skills.ALL)
             {
-                foreach (var currSkill in _allSkills)
+                foreach (var currSkill in AllSkills)
                 {
-                    if (!IsSkillEnabled(currSkill)) continue;
+                    if (currSkill == Skills.FISHING || !IsSkillEnabled(currSkill)) continue;
                     pointsPerHitCurrent.Set(currSkill, points);
                 }
                 _sb.Clear();
-                _sb.Append("New points per hit:");
-                foreach (var currSkill in _allSkills)
+                _sb.Append(L("New points per hit:"));
+                foreach (var currSkill in AllSkills)
                 {
-                    if (!IsSkillEnabled(currSkill)) continue;
-                    _sb.Append($" {currSkill} > {pointsPerHitCurrent.Get(currSkill)} |");
+                    if (currSkill == Skills.FISHING || !IsSkillEnabled(currSkill)) continue;
+                    _sb.Append(L(" {0} > {1} |", L(currSkill + "Skill"), pointsPerHitCurrent.Get(currSkill)));
                 }
                 user.Reply(_sb.ToString().TrimEnd('|'));
             }
@@ -901,11 +909,11 @@ namespace Oxide.Plugins
             {
                 pointsPerHitCurrent.Set(skill, points);
                 _sb.Clear();
-                _sb.Append("New points per hit:");
-                foreach (var currSkill in _allSkills)
+                _sb.Append(L("New points per hit:"));
+                foreach (var currSkill in AllSkills)
                 {
-                    if (!IsSkillEnabled(currSkill)) continue;
-                    _sb.Append($" {currSkill} > {pointsPerHitCurrent.Get(currSkill)} |");
+                    if (currSkill == Skills.FISHING || !IsSkillEnabled(currSkill)) continue;
+                    _sb.Append(L(" {0} > {1} |", L(currSkill + "Skill"), pointsPerHitCurrent.Get(currSkill)));
                 }
                 user.Reply(_sb.ToString().TrimEnd('|'));
             }
@@ -916,19 +924,19 @@ namespace Oxide.Plugins
             if (!user.IsAdmin) return;
             if (args.Length < 1)
             {
-                user.Reply(_("XPM USE 1", user.Id));
-                user.Reply(_("XPM USE 2", user.Id));
+                Reply(user, "XPM USE 1");
+                Reply(user, "XPM USE 2");
                 return;
             }
             IPlayer target = covalence.Players.FindPlayer(args[0]);
-            if (target is null)
+            if (target == null)
             {
-                user.Reply(_("PLAYER NOT FOUND", user.Id));
+                Reply(user, "PLAYER NOT FOUND");
                 return;
             }
-            if (!_storedData.PlayerInfo.TryGetValue(ulong.Parse(target.Id), out var playerData))
+            if (!data.PlayerInfo.TryGetValue(Convert.ToUInt64(target.Id), out var playerData))
             {
-                user.Reply("PlayerData is NULL!");
+                Reply(user, "PlayerData is NULL!");
                 return;
             }
             if (args.Length < 2)
@@ -937,16 +945,17 @@ namespace Oxide.Plugins
                 var baseMultiplier = playerData.XP_MULTIPLIER;
                 if (baseMultiplier != bonus1)
                 {
-                    user.Reply($"Current XP multiplier for player '{target.Name}' is {baseMultiplier}% with vip raising total to {bonus1}%");
+                    Reply(user, "Current XP multiplier for player '{0}' is {1}% with vip raising total to {2}%", target.Name, baseMultiplier, bonus1);
                 }
-                else user.Reply($"Current XP multiplier for player '{target.Name}' is {baseMultiplier}%");
+                else Reply(user, "Current XP multiplier for player '{0}' is {1}%", target.Name, baseMultiplier);
                 return;
             }
-            if (double.TryParse(args[1], out double multiplier))
+            double multiplier = -1;
+            if (double.TryParse(args[1], out multiplier))
             {
                 if (multiplier <= 0)
                 {
-                    user.Reply("Incorrect number. Must be greater than 0");
+                    Reply(user, "Incorrect number. Must be greater than 0");
                     return;
                 }
             }
@@ -954,9 +963,9 @@ namespace Oxide.Plugins
             var bonus2 = getXpMulti(playerData, target.Id);
             if (multiplier != bonus2)
             {
-                user.Reply($"New XP multiplier for player '{target.Name}' is {getXpMulti(playerData, target.Id)}% with vip raising total to {bonus2}%");
+                Reply(user, "New XP multiplier for player '{0}' is {1}% with vip raising total to {2}%", target.Name, multiplier, bonus2);
             }
-            else user.Reply($"New XP multiplier for player '{target.Name}' is {getXpMulti(playerData, target.Id)}%");
+            else Reply(user, "New XP multiplier for player '{0}' is {1}%", target.Name, bonus2);
         }
 
         private void InfoCommand(IPlayer user, string command, string[] args)
@@ -969,19 +978,19 @@ namespace Oxide.Plugins
             {
                 if (!GetLookingAtPlayer(user))
                 {
-                    user.Reply(_("INFO USE", user.Id));
+                    Reply(user, "INFO USE");
                 }
                 return;
             }
             IPlayer target = covalence.Players.FindPlayer(args[0]);
-            if (target is null)
+            if (target == null)
             {
-                user.Reply(_("PLAYER NOT FOUND", user.Id));
+                Reply(user, "PLAYER NOT FOUND");
                 return;
             }
-            if (!_storedData.PlayerInfo.TryGetValue(ulong.Parse(target.Id), out var playerData))
+            if (!data.PlayerInfo.TryGetValue(Convert.ToUInt64(target.Id), out var playerData))
             {
-                user.Reply("PlayerData is NULL!");
+                Reply(user, "PlayerData is NULL!");
                 return;
             }
             PrintInfo(user, target.Id, target.Name, playerData);
@@ -990,27 +999,29 @@ namespace Oxide.Plugins
         private bool GetLookingAtPlayer(IPlayer user)
         {
             BasePlayer player = user.Object as BasePlayer;
-            if (player is null) return false;
+            if (player == null) return false;
             BasePlayer target = RelationshipManager.GetLookingAtPlayer(player);
-            if (target is null) return false;
-            if (!_storedData.PlayerInfo.TryGetValue(target.userID, out var playerData)) return false;
+            if (target == null) return false;
+            if (!data.PlayerInfo.TryGetValue(target.userID, out var playerData)) return false;
             PrintInfo(user, target.UserIDString, target.displayName, playerData);
             return true;
         }
 
         private void PrintInfo(IPlayer user, string targetId, string targetName, PlayerInfo playerData)
         {
+            string L(string key) => Localize(key, user.Id);
             TextTable textTable = new();
-            textTable.AddColumn("FieldInfo");
-            textTable.AddColumn("Level");
-            textTable.AddColumn("Points");
-            textTable.AddRow(new string[] { _("ACQUIRESkill", targetId), $"{playerData.ACQUIRE_LEVEL:#0.##}", $"{playerData.ACQUIRE_POINTS:#0.##}" });
-            textTable.AddRow(new string[] { _("CRAFTINGSkill", targetId), $"{playerData.CRAFTING_LEVEL:#0.##}", $"{playerData.CRAFTING_POINTS:#0.##}" });
-            textTable.AddRow(new string[] { _("MININGSkill", targetId), $"{playerData.MINING_LEVEL:#0.##}", $"{playerData.MINING_POINTS:#0.##}" });
-            textTable.AddRow(new string[] { _("SKINNINGSkill", targetId), $"{playerData.SKINNING_LEVEL:#0.##}", $"{playerData.SKINNING_POINTS:#0.##}" });
-            textTable.AddRow(new string[] { _("WOODCUTTINGSkill", targetId), $"{playerData.WOODCUTTING_LEVEL:#0.##}", $"{playerData.WOODCUTTING_POINTS:#0.##}" });
-            textTable.AddRow(new string[] { _("XPM", targetId), $"{getXpMulti(playerData, targetId):#0.##}%", string.Empty });
-            user.Reply($"\n{_("STATS", targetId)}{targetName}\n{textTable}");
+            textTable.AddColumn(L("FieldInfo"));
+            textTable.AddColumn(L("Level"));
+            textTable.AddColumn(L("Points"));
+            textTable.AddRow(L("ACQUIRESkill"), $"{playerData.ACQUIRE_LEVEL:#0.##}", $"{playerData.ACQUIRE_POINTS:#0.##}");
+            textTable.AddRow(L("CRAFTINGSkill"), $"{playerData.CRAFTING_LEVEL:#0.##}", $"{playerData.CRAFTING_POINTS:#0.##}");
+            textTable.AddRow(L("MININGSkill"), $"{playerData.MINING_LEVEL:#0.##}", $"{playerData.MINING_POINTS:#0.##}");
+            textTable.AddRow(L("SKINNINGSkill"), $"{playerData.SKINNING_LEVEL:#0.##}", $"{playerData.SKINNING_POINTS:#0.##}");
+            textTable.AddRow(L("WOODCUTTINGSkill"), $"{playerData.WOODCUTTING_LEVEL:#0.##}", $"{playerData.WOODCUTTING_POINTS:#0.##}");
+            textTable.AddRow(L("FISHINGSkill"), $"{playerData.FISHING_LEVEL:#0.##}", $"{playerData.FISHING_POINTS:#0.##}");
+            textTable.AddRow(L("XPM"), $"{getXpMulti(playerData, targetId):#0.##}%", string.Empty);
+            user.Reply($"\n{L("STATS")}{targetName}\n{textTable}");
         }
 
         private void ResetCommand(IPlayer user, string command, string[] args)
@@ -1018,17 +1029,16 @@ namespace Oxide.Plugins
             if (!user.IsAdmin) return;
             if (args.Length != 1 || args[0] != "true")
             {
-                user.Reply(_("RESET USE", user.Id));
+                Reply(user, "RESET USE");
                 return;
             }
             WipeData();
             SaveData();
             foreach (var player in BasePlayer.activePlayerList)
             {
-                DestroyGUI(player);
                 CreateGUI(player, GetPlayerInfo(player));
             }
-            user.Reply("Userdata was successfully reset to zero");
+            Reply(user, "Userdata was successfully reset to zero");
             Puts("{0} ({1}) reset userdata to zero", user.Name, user.Id);
         }
 
@@ -1036,29 +1046,31 @@ namespace Oxide.Plugins
         {
             if (!user.IsAdmin) return;
 
+            string L(string key) => Localize(key, user.Id);
+
             if (args.Length < 3)
             {
                 _sb.Clear();
-                _sb.AppendLine("Syntax: zl.lvl name|steamid skill [OPERATOR]NUMBER");
-                _sb.AppendLine("Example: zl.lvl Player WC /2 -- Player gets his WC level divided by 2.");
-                _sb.AppendLine("Example: zl.lvl * * +3 -- Everyone currently playing in the server gets +3 for all skills.");
-                _sb.AppendLine("Example: zl.lvl ** * /2 -- Everyone (including offline players) gets their level divided by 2.");
-                _sb.AppendLine("Instead of names you can use wildcard(*): * - affects online players, ** - affects all players");
-                _sb.AppendLine("Possible operators: *(XP Modified %), +(Adds level), -(Removes level), /(Divides level)").AppendLine();
+                _sb.AppendLine(L("Syntax: zl.lvl name|steamid skill [OPERATOR]NUMBER"));
+                _sb.AppendLine(L("Example: zl.lvl Player WC /2 -- Player gets his WC level divided by 2."));
+                _sb.AppendLine(L("Example: zl.lvl * * +3 -- Everyone currently playing in the server gets +3 for all skills."));
+                _sb.AppendLine(L("Example: zl.lvl ** * /2 -- Everyone (including offline players) gets their level divided by 2."));
+                _sb.AppendLine(L("Instead of names you can use wildcard(*): * - affects online players, ** - affects all players"));
+                _sb.AppendLine(L("Possible operators: *(XP Modified %), +(Adds level), -(Removes level), /(Divides level)")).AppendLine();
                 user.Reply(_sb.ToString());
                 return;
             }
             var playerName = args[0];
             IPlayer target = covalence.Players.FindPlayer(playerName);
 
-            if (playerName != "*" && playerName != "**" && target is null)
+            if (playerName != "*" && playerName != "**" && target == null)
             {
-                user.Reply(_("PLAYER NOT FOUND", user.Id));
+                Reply(user, "PLAYER NOT FOUND");
                 return;
             }
-            if (playerName != "*" && playerName != "**" && !_storedData.PlayerInfo.ContainsKey(ulong.Parse(target.Id)))
+            if (playerName != "*" && playerName != "**" && !data.PlayerInfo.ContainsKey(Convert.ToUInt64(target.Id)))
             {
-                user.Reply("PlayerData is NULL!");
+                Reply(user, "PlayerData is NULL!");
                 return;
             }
 
@@ -1077,7 +1089,8 @@ namespace Oxide.Plugins
                 else if (skillName.Equals("M")) skill = Skills.MINING;
                 else if (skillName.Equals("A")) skill = Skills.ACQUIRE;
                 else if (skillName.Equals("S")) skill = Skills.SKINNING;
-                else { user.Reply("Incorrect skill. Possible skills are: WC, M, S, A, C, *(All skills)."); return; }
+                else if (skillName.Equals("F")) skill = Skills.FISHING;
+                else { Reply(user, "Incorrect skill. Possible skills are: WC, M, S, A, C, F, *(All skills)."); return; }
                 var mode = 0; // 0 = SET, 1 = ADD, 2 = SUBTRACT, 3 = multiplier, 4 = divide
                 int value;
                 bool correct;
@@ -1111,7 +1124,7 @@ namespace Oxide.Plugins
                     {
                         if (skill != Skills.ALL)
                         {
-                            user.Reply("XPMultiplier is changeable for all skills! Use * instead of " + skill + ".");
+                            Reply(user, "XPMultiplier is changeable for all skills! Use * instead of {0}.", skill);
                             return;
                         }
                         if (playerMode == 1)
@@ -1122,10 +1135,10 @@ namespace Oxide.Plugins
                         else if (playerMode == 2)
                             editMultiplierForPlayer(value);
                         else if (target != null)
-                            editMultiplierForPlayer(value, ulong.Parse(target.Id));
+                            editMultiplierForPlayer(value, Convert.ToUInt64(target.Id));
 
-                        var whom = playerMode == 1 ? "ALL ONLINE PLAYERS" : playerMode == 2 ? "ALL PLAYERS" : target.Name;
-                        user.Reply($"XP rates has changed to {value}% of normal XP for {whom}");
+                        var whom = playerMode == 1 ? L("ALL ONLINE PLAYERS") : playerMode == 2 ? L("ALL PLAYERS") : target.Name;
+                        Reply(user, "XP rates has changed to {0}% of normal XP for {1}", value, whom);
                         return;
                     }
                     if (playerMode == 1)
@@ -1139,7 +1152,7 @@ namespace Oxide.Plugins
                     {
                         foreach (var other in covalence.Players.All)
                         {
-                            if (_storedData.PlayerInfo.ContainsKey(ulong.Parse(other.Id)))
+                            if (data.PlayerInfo.ContainsKey(Convert.ToUInt64(other.Id)))
                             {
                                 adminModifyPlayerStats(user, skill, value, mode, other);
                             }
@@ -1160,7 +1173,7 @@ namespace Oxide.Plugins
             int count = 0;
             var pi = CreatePlayerInfo();
 
-            foreach (var info in _storedData.PlayerInfo)
+            foreach (var info in data.PlayerInfo)
             {
                 if (info.Value.IsDefault(pi))
                 {
@@ -1168,17 +1181,17 @@ namespace Oxide.Plugins
                 }
             }
 
-            user.Reply($"{count} / {_storedData.PlayerInfo.Count} entries in datafile can be removed");
+            Reply(user, "{0} / {1} entries in datafile can be removed", count, data.PlayerInfo.Count);
         }
 
         private void CleanCommand(IPlayer user, string command, string[] args)
         {
             if (!user.IsAdmin) return;
 
-            int count = _storedData.PlayerInfo.Count;
+            int count = data.PlayerInfo.Count;
             int cleaned = Clean();
 
-            user.Reply($"{cleaned} / {count} entries in datafile have been removed");
+            Reply(user, "{0} / {1} entries in datafile have been removed", cleaned, count);
             SaveData();
         }
 
@@ -1186,19 +1199,19 @@ namespace Oxide.Plugins
         {
             int count = 0;
 
-            if (_storedData is null)
+            if (data == null)
             {
                 return count;
             }
 
             var pi = CreatePlayerInfo();
 
-            foreach (var info in _storedData.PlayerInfo.ToList())
+            foreach (var info in data.PlayerInfo.ToList())
             {
                 if (info.Value.IsDefault(pi))
                 {
                     count++;
-                    _storedData.PlayerInfo.Remove(info.Key);
+                    data.PlayerInfo.Remove(info.Key);
                 }
             }
 
@@ -1211,7 +1224,7 @@ namespace Oxide.Plugins
 
             if (args.Length == 1 && args[0] == "status")
             {
-                user.Reply(config.generic.penaltyOnDeath ? "Penalty is currently enabled." : "Penalty is currently disabled.");
+                Reply(user, config.generic.penaltyOnDeath ? "Penalty is currently enabled." : "Penalty is currently disabled.");
                 return;
             }
 
@@ -1221,12 +1234,12 @@ namespace Oxide.Plugins
             if (config.generic.penaltyOnDeath || config.generic.penaltyOnSuicide)
             {
                 Subscribe(nameof(OnEntityDeath));
-                user.Reply("Penalty is now enabled.");
+                Reply(user, "Penalty is now enabled.");
             }
             else
             {
                 Unsubscribe(nameof(OnEntityDeath));
-                user.Reply("Penalty is now disabled.");
+                Reply(user, "Penalty is now disabled.");
             }
 
             SaveConfig();
@@ -1235,25 +1248,27 @@ namespace Oxide.Plugins
         [ChatCommand("stats")]
         private void StatsCommand(BasePlayer player, string command, string[] args)
         {
-            if (!hasRights(player.UserIDString))
+            if (!hasRights(player))
             {
                 Message(player, "NoPermission");
                 return;
             }
+            string id = player.UserIDString;
+            string L(string key, params object[] args) => Localize(key, id, args);
             _sb.Clear();
-            _sb.AppendLine("<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>");
-            foreach (Skills skill in _allSkills) _sb.Append(getStatPrint(player, skill));
+            _sb.AppendLine(L("<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>"));
+            foreach (Skills skill in AllSkills) _sb.Append(getStatPrint(player, skill));
             var pi = GetPlayerInfo(player.userID);
-            var alive = ReadableTimeSpan(DateTime.UtcNow - ToDateTimeFromEpoch(pi.LAST_DEATH));
-            _sb.AppendLine().AppendLine($"Time alive: {alive}");
-            _sb.AppendLine($"XP rates for you are {getXpMulti(pi, player.UserIDString)}%");
+            var alive = ReadableTimeSpan(DateTime.UtcNow - ToDateTimeFromEpoch(pi.LAST_DEATH), id);
+            _sb.AppendLine().AppendLine(L("Time alive: {0}", alive));
+            _sb.AppendLine(L("XP rates for you are {0}%", getXpMulti(pi, id)));
             SendReply(player, _sb.ToString());
         }
 
         [ChatCommand("statinfo")]
         private void StatInfoCommand(BasePlayer player, string command, string[] args)
         {
-            if (!hasRights(player.UserIDString))
+            if (!hasRights(player))
             {
                 Message(player, "NoPermission");
                 return;
@@ -1262,40 +1277,100 @@ namespace Oxide.Plugins
             _sb.Clear();
             var colors = config.settings.colors;
             var craftingDetails = config.settings.craftingDetails;
+            var fishingDetails = config.settings.fishingDetails;
             var xpm = getXpMulti(GetPlayerInfo(player.userID), player.UserIDString) / 100f;
             var m = player.GetHeldEntity() is Jackhammer ? pointsPerHitPowerToolCurrent.Get(Skills.MINING) : pointsPerHitCurrent.Get(Skills.MINING);
             var wc = player.GetHeldEntity() is Chainsaw ? pointsPerHitPowerToolCurrent.Get(Skills.WOODCUTTING) : pointsPerHitCurrent.Get(Skills.WOODCUTTING);
 
-            _sb.AppendLine("<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>");
+            string L(string key, params object[] args) => Localize(key, player.UserIDString, args);
 
-            AppendLine(colors.ACQUIRE, pointsPerHitCurrent.Get(Skills.ACQUIRE) * xpm, Skills.ACQUIRE);
-            AppendLine(colors.MINING, m * xpm, Skills.MINING);
-            AppendLine(colors.SKINNING, pointsPerHitCurrent.Get(Skills.SKINNING) * xpm, Skills.SKINNING);
-            AppendLine(colors.WOODCUTTING, wc * xpm, Skills.WOODCUTTING);
+            _sb.AppendLine(L("<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>"));
 
-            _sb.AppendLine($"<color={colors.CRAFTING}>Crafting</color> {(!IsSkillEnabled(Skills.CRAFTING) ? "(DISABLED)" : string.Empty)}");
-            _sb.AppendLine($"XP gain: <color={colors.SKINNING}>You get {craftingDetails.xp} XP per {craftingDetails.time}s spent crafting.</color>");
-            _sb.AppendLine($"Bonus: <color={colors.SKINNING}>Crafting time is decreased by {craftingDetails.percent}% per every level.</color>");
+            AppendLine(colors.ACQUIRE, pointsPerHitCurrent.Get(Skills.ACQUIRE) * xpm, Skills.ACQUIRE, player);
+            AppendLine(colors.MINING, m * xpm, Skills.MINING, player);
+            AppendLine(colors.SKINNING, pointsPerHitCurrent.Get(Skills.SKINNING) * xpm, Skills.SKINNING, player);
+            AppendLine(colors.WOODCUTTING, wc * xpm, Skills.WOODCUTTING, player);
+
+            _sb.AppendLine(L("<color={0}>{1}</color> {2}", colors.FISHING, L("FISHINGSkill"), !IsSkillEnabled(Skills.FISHING) ? L("(DISABLED)") : string.Empty));
+            _sb.AppendLine(L("XP per catch: <color={0}>{1:#0.##}</color>", colors.FISHING, fishingDetails.xpPerCatch * xpm));
+            _sb.AppendLine(L("Bonus: <color={0}>Each level after 1 adds a {1:#0.##}% chance to catch one extra fish, up to {2:#0.##}%.</color>", colors.FISHING, fishingDetails.extraFishChancePerLevel, fishingDetails.maxExtraFishChance));
+
+            _sb.AppendLine(L("<color={0}>{1}</color> {2}", colors.CRAFTING, L("CRAFTINGSkill"), !IsSkillEnabled(Skills.CRAFTING) ? L("(DISABLED)") : string.Empty));
+            _sb.AppendLine(L("XP gain: <color={0}>You get {1} XP per {2}s spent crafting.</color>", colors.SKINNING, craftingDetails.xp, craftingDetails.time));
+            _sb.AppendLine(L("Bonus: <color={0}>Crafting time is decreased by {1}% per every level.</color>", colors.SKINNING, craftingDetails.percent));
 
             SendReply(player, _sb.ToString());
             _sb.Clear();
         }
 
-        private void AppendLine(string color, double xp, Skills skill)
+        private void AppendLine(string color, double xp, Skills skill, BasePlayer player)
         {
-            var state = !IsSkillEnabled(skill) ? "(DISABLED)" : string.Empty;
+            string L(string key, params object[] args) => Localize(key, player.UserIDString, args);
+
+            var state = !IsSkillEnabled(skill) ? L("(DISABLED)") : string.Empty;
             var bonus = (getGathMult(2, skill) - 1) * 100;
 
-            _sb.AppendLine($"<color={color}>{skill}</color> {state}");
-            _sb.AppendLine($"XP per hit: <color={color}>{xp}</color>");
-            _sb.AppendLine($"Bonus materials per level: <color={color}>{bonus:#0.##} %</color>");
+            _sb.AppendLine(L("<color={0}>{1}</color> {2}", color, L(skill + "Skill"), state));
+            _sb.AppendLine(L("XP per hit: <color={0}>{1}</color>", color, xp));
+            _sb.AppendLine(L("Bonus materials per level: <color={0}>{1:#0.##} %</color>", color, bonus));
         }
 
         [ChatCommand("statsui")]
         private void StatsUICommand(BasePlayer player, string command, string[] args)
         {
-            if (!hasRights(player.UserIDString)) return;
+            if (!hasRights(player)) return;
             var pi = GetPlayerInfo(player);
+
+            if (args.Length > 0)
+            {
+                if (args[0].Equals("move", StringComparison.OrdinalIgnoreCase))
+                {
+                    ToggleMoveUi(player);
+                    return;
+                }
+                if (args[0].Equals("button", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (config.cui.MoveButtonPanel == ClientPanels.None)
+                    {
+                        Message(player, "The stats UI move button is disabled. Use /statsui move to move the UI.");
+                        return;
+                    }
+                    pi.CUIMOVE = !pi.CUIMOVE;
+                    CreateGUI(player, pi);
+                    Message(player, pi.CUIMOVE ? "Stats UI move button hidden. Use /statsui move to move the UI." : "Stats UI move button shown.");
+                    return;
+                }
+                if (args[0].Equals("reset", StringComparison.OrdinalIgnoreCase))
+                {
+                    data.UiPositions.Remove(player.userID);
+                    if (pi.CUI && pi.ENABLED)
+                    {
+                        UpdateGUIPosition(player);
+                    }
+                    Message(player, "Stats UI position reset.");
+                    return;
+                }
+                if (player.IsAdmin && args[0].Equals("setui", StringComparison.OrdinalIgnoreCase))
+                {
+                    var offsets = config.cui.cuiPositioning;
+                    offsets.NormalizedAnchor = data.UiPositions.TryGetValue(player.userID, out Vector2 position) ? position : offsets.NormalizedAnchor;
+                    data.UiPositions.Clear();
+                    SaveConfig();
+                    SaveData();
+                    Message(player, "Default stats UI position saved and all player positions reset.");
+                    foreach (var target in BasePlayer.activePlayerList)
+                    {
+                        if (!hasRights(target)) continue;
+                        PlayerInfo targetInfo = GetPlayerInfo(target);
+                        if (targetInfo.CUI && targetInfo.ENABLED && target.IsAlive() && !target.IsSleeping())
+                        {
+                            UpdateGUIPosition(target);
+                        }
+                    }
+                    return;
+                }
+            }
+
             if (pi.CUI)
             {
                 DestroyGUI(player);
@@ -1308,10 +1383,81 @@ namespace Oxide.Plugins
             }
         }
 
+        private Dictionary<ItemDefinition, ItemModFishable> _fishable = new();
+        [ConsoleCommand("zl.fishing.items")]
+        private void FishingItemsCommand(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player = arg.Player();
+            if (player != null && !player.IsAdmin)
+                return;
+
+            string id = player?.UserIDString;
+            using var catchables = Facepunch.Pool.Get<PooledList<(ItemDefinition def, ItemModFishable fishable)>>();
+            foreach (ItemDefinition def in ItemManager.GetItemDefinitions())
+            {
+                if (TryGetFishable(def, out ItemModFishable fishable))
+                {
+                    catchables.Add((def, fishable));
+                }
+            }
+
+            catchables.Sort((left, right) =>
+            {
+                int result = left.fishable.IsJunk.CompareTo(right.fishable.IsJunk);
+                return result != 0 ? result : left.def.shortname.CompareTo(right.def.shortname);
+            });
+
+            string L(string key, params object[] args) => Localize(key, id, args);
+
+            using var table = Facepunch.Pool.Get<TextTable>();
+            table.AddColumns(L("shortname (itemid)"), L("bait"), L("depth"), L("water"), L("weight"), L("type"));
+
+            foreach (var (def, fishable) in catchables)
+            {
+                table.AddRow(
+                    $"{def.shortname} ({def.itemid})",
+                    FormatRange(fishable.MinimumBaitLevel, fishable.MaximumBaitLevel, id),
+                    FormatRange(fishable.MinimumWaterDepth, fishable.MaximumWaterDepth, id),
+                    (int)fishable.RequiredTag == -1 ? L("any") : fishable.RequiredTag.ToString(),
+                    fishable.Chance.ToString("0.###"),
+                    L(fishable.IsJunk ? "junk" : "fish")
+                );
+            }
+
+            arg.ReplyWith(L("catchables:\n{0}", table));
+        }
+
+        private bool TryGetFishable(ItemDefinition def, out ItemModFishable fishable)
+        {
+            if (_fishable.TryGetValue(def, out fishable)) return true;
+            if (!def.TryGetComponent(out fishable) || !fishable.CanBeFished) return false;
+            _fishable[def] = fishable;
+            return true;
+        }
+
+        private string FormatRange(float min, float max, string id)
+        {
+            if (min <= 0f && max <= 0f) return Localize("any", id);
+            if (max <= 0f) return $"{min:0.##}+";
+            return $"{min:0.##}-{max:0.##}";
+        }
+
+        [ConsoleCommand("zl.ui.move")]
+        private void CommandMoveUi(ConsoleSystem.Arg arg) => ToggleMoveUi(arg.Player());
+
+        private void ToggleMoveUi(BasePlayer player)
+        {
+            if (!config.cui.IsEnabled || !hasRights(player)) return;
+            PlayerInfo pi = GetPlayerInfo(player);
+            if (!pi.ENABLED || !pi.CUI || !player.IsAlive() || player.IsSleeping() || !player.IsConnected) return;
+            if (!uiMovePlayers.Add(player.userID)) uiMovePlayers.Remove(player.userID);
+            CreateGUI(player, pi);
+        }
+
         [ChatCommand("statsonoff")]
         private void StatsOnOffCommand(BasePlayer player, string command, string[] args)
         {
-            if (!hasRights(player.UserIDString)) return;
+            if (!hasRights(player)) return;
             var pi = GetPlayerInfo(player);
             if (pi.ENABLED)
             {
@@ -1335,10 +1481,13 @@ namespace Oxide.Plugins
         private void Unsubscribe()
         {
             Unsubscribe(nameof(OnCollectiblePickup));
+            Unsubscribe(nameof(OnCollectiblePickedup));
+            Unsubscribe(nameof(OnCuiDraggableDrag));
             Unsubscribe(nameof(OnDispenserBonus));
             Unsubscribe(nameof(OnDispenserGather));
             Unsubscribe(nameof(OnEntityDeath));
             Unsubscribe(nameof(OnEntityKill));
+            Unsubscribe(nameof(OnFishCatch));
             Unsubscribe(nameof(OnGrowableGathered));
             Unsubscribe(nameof(OnItemCraft));
             Unsubscribe(nameof(OnItemCraftFinished));
@@ -1406,12 +1555,17 @@ namespace Oxide.Plugins
 
             if (config.functions.enableCollectiblePickup)
             {
-                Subscribe(nameof(OnCollectiblePickup));
+                Subscribe(config.functions.GetCollectiblePickupHook);
             }
 
             if (config.functions.enableCropGather)
             {
                 Subscribe(nameof(OnGrowableGathered));
+            }
+
+            if (IsSkillEnabled(Skills.FISHING))
+            {
+                Subscribe(nameof(OnFishCatch));
             }
 
             if (config.functions.enableDispenserGather)
@@ -1441,6 +1595,11 @@ namespace Oxide.Plugins
                 }
             }
 
+            if (config.cui.IsEnabled)
+            {
+                Subscribe(nameof(OnCuiDraggableDrag));
+            }
+
             Subscribe(nameof(OnPlayerConnected));
             Subscribe(nameof(OnPlayerDisconnected));
             Subscribe(nameof(OnPlayerRespawned));
@@ -1449,18 +1608,18 @@ namespace Oxide.Plugins
             Subscribe(nameof(OnEntityKill));
             Subscribe(nameof(Unload));
 
-            _timer = timer.Repeat(300f, 0, SaveData);
+            timer.Repeat(300f, 0, SaveData);
         }
 
         private void CheckCollectible()
         {
             var collectList = Resources.FindObjectsOfTypeAll<CollectibleEntity>().Select(c => c.ShortPrefabName).Distinct().ToList();
-            if (collectList is null || collectList.Count == 0)
+            if (collectList == null || collectList.Count == 0)
             {
                 return;
             }
 
-            if (config.functions.enabledCollectibleEntity is null)
+            if (config.functions.enabledCollectibleEntity == null)
             {
                 config.functions.enabledCollectibleEntity = new();
             }
@@ -1483,9 +1642,9 @@ namespace Oxide.Plugins
 
         private void SaveData()
         {
-            if (_storedData != null)
+            if (data != null)
             {
-                Interface.Oxide.DataFileSystem.WriteObject(Name, _storedData);
+                Interface.Oxide.DataFileSystem.WriteObject(Name, data);
             }
         }
 
@@ -1509,13 +1668,13 @@ namespace Oxide.Plugins
                 Puts(ex.ToString());
             }
 
-            if (_craftData is null)
+            if (_craftData == null)
             {
                 Puts("Crafting data is null and has been reset!");
                 _craftData = new();
             }
 
-            if (_craftData.CraftList is null)
+            if (_craftData.CraftList == null)
             {
                 Puts("Crafting list is null and has been reset!");
                 _craftData.CraftList = new();
@@ -1530,7 +1689,7 @@ namespace Oxide.Plugins
 
             try
             {
-                _storedData = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
+                data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
             }
             catch (Exception ex)
             {
@@ -1538,12 +1697,17 @@ namespace Oxide.Plugins
                 Puts(ex.ToString());
             }
 
-            if (_storedData is null || _storedData.PlayerInfo is null)
+            if (data == null || data.PlayerInfo == null)
             {
                 Puts("Data is null, resetting to defaults!");
-                _storedData = new();
+                data = new();
             }
-            else if (newSaveDetected)
+            else
+            {
+                data.UiPositions ??= new();
+            }
+
+            if (newSaveDetected)
             {
                 Puts("Wiping data... new save detected");
                 WipeData();
@@ -1554,45 +1718,48 @@ namespace Oxide.Plugins
         {
             if (string.IsNullOrEmpty(config.generic.nowipe))
             {
-                _storedData = new();
+                Dictionary<ulong, Vector2> uiPositions = data?.UiPositions ?? new();
+                data = new();
+                data.UiPositions = uiPositions;
                 return;
             }
-            foreach (var pair in _storedData.PlayerInfo.ToList())
+            foreach (var pair in data.PlayerInfo.ToList())
             {
                 if (permission.UserHasPermission(pair.Key.ToString(), config.generic.nowipe))
                 {
                     continue;
                 }
-                _storedData.PlayerInfo.Remove(pair.Key);
+                data.PlayerInfo.Remove(pair.Key);
             }
         }
 
-        private bool hasRights(string UserIDString)
-        {
-            return !config.generic.enablePermission || permission.UserHasPermission(UserIDString, config.generic.permissionName);
-        }
+        private bool hasRights(BasePlayer player) => IsValid(player) && hasRights(player.UserIDString);
+
+        private bool hasRights(string UserIDString) => !config.generic.enablePermission || permission.UserHasPermission(UserIDString, config.generic.permissionName);
 
         private void editMultiplierForPlayer(double multiplier, ulong userID = ulong.MinValue)
         {
             if (userID == ulong.MinValue)
             {
-                foreach (var p in _storedData.PlayerInfo.ToList())
-                    _storedData.PlayerInfo[p.Key].XP_MULTIPLIER = multiplier;
+                foreach (var p in data.PlayerInfo.ToList())
+                    data.PlayerInfo[p.Key].XP_MULTIPLIER = multiplier;
                 return;
             }
-            if (_storedData.PlayerInfo.TryGetValue(userID, out var playerData))
+            if (data.PlayerInfo.TryGetValue(userID, out var playerData))
                 playerData.XP_MULTIPLIER = multiplier;
         }
 
         private void adminModifyPlayerStats(IPlayer user, Skills skill, double level, int mode, IPlayer target)
         {
-            var id = ulong.Parse(target.Id);
+            var id = Convert.ToUInt64(target.Id);
             var pi = GetPlayerInfo(id);
+
+            string L(string key, params object[] args) => Localize(key, user.Id, args);
 
             if (skill == Skills.ALL)
             {
                 _sb.Clear();
-                foreach (var currSkill in _allSkills)
+                foreach (var currSkill in AllSkills)
                 {
                     if (!IsSkillEnabled(currSkill)) continue;
                     var modifiedLevel = getLevel(pi, currSkill);
@@ -1611,10 +1778,10 @@ namespace Oxide.Plugins
                         modifiedLevel = levelCap;
                     setPointsAndLevel(pi, currSkill, getLevelPoints(modifiedLevel), modifiedLevel);
                     var basePlayer = BasePlayer.FindByID(id);
-                    if (basePlayer != null) CreateGUI(basePlayer, GetPlayerInfo(basePlayer));
-                    _sb.Append($"({_(currSkill + "Skill")} > {modifiedLevel}) ");
+                    if (basePlayer != null) GUIUpdateSkill(basePlayer, currSkill);
+                    _sb.Append(L("({0} > {1}) ", L(currSkill + "Skill"), modifiedLevel));
                 }
-                user.Reply($"\nChanges for '{target.Name}': " + _sb.ToString().TrimEnd());
+                Reply(user, "\nChanges for '{0}': {1}", target.Name, _sb.ToString().TrimEnd());
             }
             else
             {
@@ -1637,7 +1804,7 @@ namespace Oxide.Plugins
                 setPointsAndLevel(pi, skill, getLevelPoints(modifiedLevel), modifiedLevel);
                 var basePlayer = BasePlayer.FindByID(id);
                 if (basePlayer != null) GUIUpdateSkill(basePlayer, skill);
-                user.Reply($"{_(skill + "Skill")} Lvl for [{target.Name}] set to: [{modifiedLevel}]");
+                Reply(user, "{0} Lvl for [{1}] set to: [{2}]", L(skill + "Skill"), target.Name, modifiedLevel);
             }
         }
 
@@ -1646,18 +1813,16 @@ namespace Oxide.Plugins
             if (!IsSkillEnabled(skill))
                 return string.Empty;
 
+            string L(string key) => Localize(key, player.UserIDString);
+
             var pi = GetPlayerInfo(player);
             var levelCap = config.settings.levelCaps.Get(skill);
             var skillMaxed = levelCap != 0 && getLevel(pi, skill) == levelCap;
 
-            string bonusText;
-            if (skill == Skills.CRAFTING)
-                bonusText = $"{(getLevel(pi, skill) * config.settings.craftingDetails.percent):#0.##}";
-            else
-                bonusText = $"{((getGathMult(getLevel(pi, skill), skill) - 1) * 100.0):#0.##}";
+            string bonusText = $"{GetSkillBonus(getLevel(pi, skill), skill):#0.##}";
 
-            string format = $"<color={config.settings.colors.Get(skill)}>{_("StatsText", player.UserIDString)}</color>\n";
-            var skillName = _(skill + "Skill", player.UserIDString);
+            string format = $"<color={config.settings.colors.Get(skill)}>{L("StatsText")}</color>\n";
+            var skillName = L(skill + "Skill");
             var xp = $"{getLevel(pi, skill):0}" + (levelCap > 0 ? ("/" + $"{levelCap:0}") : string.Empty);
             var points = $"{getPoints(pi, skill):0}";
             var level = skillMaxed ? "∞" : $"{getLevelPoints(getLevel(pi, skill) + 1):0}";
@@ -1690,6 +1855,10 @@ namespace Oxide.Plugins
                     pi.WOODCUTTING_POINTS = pi.WOODCUTTING_POINTS - 10.0 > points ? pi.WOODCUTTING_POINTS - points : 10.0;
                     pi.WOODCUTTING_LEVEL = getPointsLevel(pi.WOODCUTTING_POINTS, skill);
                     break;
+                case Skills.FISHING:
+                    pi.FISHING_POINTS = pi.FISHING_POINTS - 10.0 > points ? pi.FISHING_POINTS - points : 10.0;
+                    pi.FISHING_LEVEL = getPointsLevel(pi.FISHING_POINTS, skill);
+                    break;
             }
         }
 
@@ -1704,6 +1873,7 @@ namespace Oxide.Plugins
                 Skills.MINING => config.generic.penaltyReset ? pi.MINING_POINTS : getPercentAmount(pi.MINING_LEVEL, penaltyPercent),
                 Skills.SKINNING => config.generic.penaltyReset ? pi.SKINNING_POINTS : getPercentAmount(pi.SKINNING_LEVEL, penaltyPercent),
                 Skills.WOODCUTTING => config.generic.penaltyReset ? pi.WOODCUTTING_POINTS : getPercentAmount(pi.WOODCUTTING_LEVEL, penaltyPercent),
+                Skills.FISHING => config.generic.penaltyReset ? pi.FISHING_POINTS : getPercentAmount(pi.FISHING_LEVEL, penaltyPercent),
                 _ => 0,
             };
         }
@@ -1729,46 +1899,68 @@ namespace Oxide.Plugins
 
         private int levelHandler(PlayerInfo pi, BasePlayer player, int prevAmount, Skills skill, BaseEntity source, bool isPowerTool = false)
         {
-            object extCanGainZLevelXP = Interface.CallHook("CanGainXP", new object[] { player, source });
-
-            if (extCanGainZLevelXP is bool && !(bool)extCanGainZLevelXP)
-            {
+            double level = getLevel(pi, skill);
+            double points = isPowerTool ? pointsPerHitPowerToolCurrent.Get(skill) : pointsPerHitCurrent.Get(skill);
+            if (!TryGainXP(pi, player, skill, source, points))
                 return prevAmount;
-            }
 
-            var xpPercentBefore = getExperiencePercent(pi, skill);
-            var currentLevel = getLevel(pi, skill);
-            var newPoints = getPoints(pi, skill);
-            var newAmount = Mathf.CeilToInt(prevAmount * (float)getGathMult(currentLevel, skill));
-            var pointsToGet = isPowerTool ? pointsPerHitPowerToolCurrent.Get(skill) : pointsPerHitCurrent.Get(skill);
-            newPoints += pointsToGet * (getXpMulti(pi, player.UserIDString) / 100.0);
+            return Mathf.CeilToInt(prevAmount * (float)getGathMult(level, skill));
+        }
 
-            if (newPoints >= getLevelPoints(currentLevel + 1))
+        private bool TryGainXP(PlayerInfo pi, BasePlayer player, Skills skill, BaseEntity source, double points)
+        {
+            object extCanGainZLevelXP = Interface.CallHook("CanGainXP", new object[] { player, source });
+            if (extCanGainZLevelXP is false)
+                return false;
+
+            string L(string key) => Localize(key, player.UserIDString);
+
+            double xpPercentBefore = getExperiencePercent(pi, skill);
+            double level = getLevel(pi, skill);
+            double newPoints = getPoints(pi, skill) + points * (getXpMulti(pi, player.UserIDString) / 100.0);
+
+            if (newPoints >= getLevelPoints(level + 1))
             {
-                var levelCap = config.settings.levelCaps.Get(skill);
-                var maxLevel = levelCap > 0 && currentLevel + 1 > levelCap;
+                double levelCap = config.settings.levelCaps.Get(skill);
+                bool maxLevel = levelCap > 0 && level + 1 > levelCap;
 
                 if (!maxLevel)
                 {
-                    currentLevel = getPointsLevel(newPoints, skill);
+                    level = getPointsLevel(newPoints, skill);
 
-                    var levelPoints = getLevelPoints(currentLevel + 1);
-                    var color = config.settings.colors.Get(skill);
-                    var skillName = _(skill + "Skill", player.UserIDString);
-                    var gatherMulti = ((getGathMult(currentLevel, skill) - 1) * 100.0).ToString("0.##");
-                    var format = $"<color={color}>{_("LevelUpText", player.UserIDString)}</color>";
+                    double levelPoints = getLevelPoints(level + 1);
+                    string color = config.settings.colors.Get(skill);
+                    string skillName = L(skill + "Skill");
+                    string bonus = GetSkillBonus(level, skill).ToString("0.##");
+                    string format = $"<color={color}>{L("LevelUpText")}</color>";
 
-                    PrintToChat(player, string.Format(format, skillName, currentLevel, newPoints, levelPoints, gatherMulti));
-                    BroadcastLevel(player, skill, color, currentLevel);
-                    GiveReward(player, skill, currentLevel);
+                    PrintToChat(player, string.Format(format, skillName, level, newPoints, levelPoints, bonus));
+                    BroadcastLevel(player, skill, color, level);
+                    GiveReward(player, skill, level);
                 }
             }
 
-            setPointsAndLevel(pi, skill, newPoints, currentLevel);
-            var xpPercentAfter = getExperiencePercent(pi, skill);
+            setPointsAndLevel(pi, skill, newPoints, level);
+            double xpPercentAfter = getExperiencePercent(pi, skill);
             if (xpPercentAfter != xpPercentBefore)
                 GUIUpdateSkill(player, skill);
-            return newAmount;
+            return true;
+        }
+
+        private double GetSkillBonus(double level, Skills skill)
+        {
+            return skill switch
+            {
+                Skills.CRAFTING => level * config.settings.craftingDetails.percent,
+                Skills.FISHING => GetFishingBonusChance(level),
+                _ => (getGathMult(level, skill) - 1.0) * 100.0
+            };
+        }
+
+        private double GetFishingBonusChance(double level)
+        {
+            var details = config.settings.fishingDetails;
+            return Math.Min(Math.Max(0.0, level - 1.0) * details.extraFishChancePerLevel, details.maxExtraFishChance);
         }
 
         private void BroadcastLevel(BasePlayer player, Skills skill, string color, double Level)
@@ -1780,7 +1972,7 @@ namespace Oxide.Plugins
                     if (target.userID == player.userID || !hasRights(target.UserIDString) || !GetPlayerInfo(target.userID).ENABLED)
                         continue;
 
-                    Message(target, "LevelUpTextBroadcast", player.displayName, Level, color, _(skill + "Skill", target.UserIDString));
+                    Message(target, "LevelUpTextBroadcast", player.displayName, Level, color, Localize(skill + "Skill", target.UserIDString));
                 }
             }
         }
@@ -1829,6 +2021,10 @@ namespace Oxide.Plugins
                     pi.WOODCUTTING_LEVEL = level;
                     pi.WOODCUTTING_POINTS = points <= 0.0 ? levelPoints : points;
                     break;
+                case Skills.FISHING:
+                    pi.FISHING_LEVEL = level;
+                    pi.FISHING_POINTS = points <= 0.0 ? levelPoints : points;
+                    break;
             }
         }
 
@@ -1846,6 +2042,8 @@ namespace Oxide.Plugins
                     return pi.SKINNING_LEVEL;
                 case Skills.WOODCUTTING:
                     return pi.WOODCUTTING_LEVEL;
+                case Skills.FISHING:
+                    return pi.FISHING_LEVEL;
             }
 
             return 0.0;
@@ -1865,6 +2063,8 @@ namespace Oxide.Plugins
                     return pi.SKINNING_POINTS;
                 case Skills.WOODCUTTING:
                     return pi.WOODCUTTING_POINTS;
+                case Skills.FISHING:
+                    return pi.FISHING_POINTS;
             }
 
             return 0.0;
@@ -1943,7 +2143,7 @@ namespace Oxide.Plugins
 
         private bool isZoneExcluded(BasePlayer player)
         {
-            if (config.settings.zones.Count == 0 || ZoneManager is null)
+            if (config.settings.zones.Count == 0 || ZoneManager == null)
             {
                 return false;
             }
@@ -1953,14 +2153,16 @@ namespace Oxide.Plugins
             return values?.Length > 0 && config.settings.zones.Any(values.Contains);
         }
 
-        private string ReadableTimeSpan(TimeSpan span)
+        private string ReadableTimeSpan(TimeSpan span, string id)
         {
+            string L(string key, params object[] args) => Localize(key, id, args);
+
             var formatted = string.Format("{0}{1}{2}{3}{4}",
-                (span.Days / 7) > 0 ? string.Format("{0:0} weeks, ", span.Days / 7) : string.Empty,
-                span.Days % 7 > 0 ? string.Format("{0:0} days, ", span.Days % 7) : string.Empty,
-                span.Hours > 0 ? string.Format("{0:0} hours, ", span.Hours) : string.Empty,
-                span.Minutes > 0 ? string.Format("{0:0} minutes, ", span.Minutes) : string.Empty,
-                span.Seconds > 0 ? string.Format("{0:0} seconds, ", span.Seconds) : string.Empty);
+                (span.Days / 7) > 0 ? L("{0:0} weeks", span.Days / 7) + ", " : string.Empty,
+                span.Days % 7 > 0 ? L("{0:0} days", span.Days % 7) + ", " : string.Empty,
+                span.Hours > 0 ? L("{0:0} hours", span.Hours) + ", " : string.Empty,
+                span.Minutes > 0 ? L("{0:0} minutes", span.Minutes) + ", " : string.Empty,
+                span.Seconds > 0 ? L("{0:0} seconds", span.Seconds) + ", " : string.Empty);
 
             if (formatted.EndsWith(", ")) formatted = formatted.Substring(0, formatted.Length - 2);
             return formatted;
@@ -1980,20 +2182,28 @@ namespace Oxide.Plugins
             return new DateTime(1970, 1, 1, 0, 0, 0, 0).AddTicks(timeInTicks);
         }
 
-        private string _(string key, string id = null) => lang.GetMessage(key, this, id);
+        private string Localize(string key, string id = null) => lang.GetMessage(key, this, id);
+
+        private string Localize(string key, string id, params object[] args) => args.Length != 0 ? string.Format(lang.GetMessage(key, this, id), args) : lang.GetMessage(key, this, id);
+
+        private void Reply(IPlayer user, string key, params object[] args)
+        {
+            if (user == null) return;
+            if (user.LastCommand == CommandType.Chat && user.Object is BasePlayer player)
+            {
+                Message(player, key, args);
+                return;
+            }
+            string message = Localize(key, user.Id, args);
+            if (!string.IsNullOrWhiteSpace(message)) user.Reply(message);
+        }
 
         private void Message(BasePlayer player, string key, params object[] args)
         {
-            string message = string.Format(_(key, player.UserIDString), args);
-
+            if (player == null) return;
+            string message = Localize(key, player.UserIDString, args);
+            if (string.IsNullOrWhiteSpace(message)) return;
             Player.Message(player, message, string.IsNullOrEmpty(config.generic.pluginPrefix) ? string.Empty : config.generic.pluginPrefix, config.generic.steamIDIcon);
-        }
-
-        private ItemDefinition GetItem(string shortname)
-        {
-            if (string.IsNullOrEmpty(shortname) || CraftItems is null) return null;
-            if (CraftItems.TryGetValue(shortname, out var item)) return item;
-            return null;
         }
 
         private void GenerateItems(bool reset = false)
@@ -2006,7 +2216,7 @@ namespace Oxide.Plugins
                 {
                     config.generic.gameProtocol = Protocol.network;
                     Config["Generic", "gameProtocol"] = config.generic.gameProtocol;
-                    Puts("Updating item list from protocol " + config_protocol + " to protocol " + config.generic.gameProtocol + ".");
+                    Puts("Updating item list from protocol {0} to protocol {1}.", config_protocol, config.generic.gameProtocol);
                     GenerateItems(true);
                     SaveConfig();
                     return;
@@ -2055,175 +2265,295 @@ namespace Oxide.Plugins
 
         private void GUIUpdateSkill(BasePlayer player, Skills skill)
         {
-            if (!skillIndex.ContainsKey(skill)) return;
+            if (!config.cui.IsEnabled || !skillIndex.ContainsKey(skill) || !hasRights(player) || !player.IsConnected || !player.IsAlive() || player.IsSleeping()) return;
             double maxRows = skillIndex.Count;
             double rowNumber = skillIndex[skill];
             var pi = GetPlayerInfo(player);
+            if (!pi.CUI || !pi.ENABLED) return;
             double level = getLevel(pi, skill);
             //If the player has the max level we don't care about the percentage
             bool isMaxLevel = level >= config.settings.levelCaps.Get(skill);
             double percent = isMaxLevel ? 100.0 : getExperiencePercent(pi, skill);
-            var skillName = _(skill.ToString() + "Skill", player.UserIDString);
-            var mainPanel = "ZL" + skillName;
-
-            CuiHelper.DestroyUi(player, mainPanel);
+            string L(string key) => Localize(key, player.UserIDString);
+            var skillName = L(skill.ToString() + "Skill");
+            var mainPanel = "ZL" + skill;
 
             var value = 1 / maxRows;
             var positionMin = 1 - (value * rowNumber);
             var positionMax = 2 - (1 - (value * (1 - rowNumber)));
 
-            var container = new CuiElementContainer()
-            {
-                {
-                    new CuiPanel
-                    {
-                        Image = {Color = config.cui.cuiBoundsBackground},
-                        RectTransform = { AnchorMin = "0 " + positionMin.ToString("0.####"), AnchorMax = $"1 "+ positionMax.ToString("0.####") },
-                    },
-                    new CuiElement().Parent = "ZLevelsUI",
-                    mainPanel
-                }
-            };
+            var container = new CuiElementContainer();
+            AddCuiPanel(container, config.cui.cuiBoundsBackground, "0 " + positionMin.ToString("0.####"), $"1 {positionMax:0.####}", "0 0", "0 0", "ZLevelsUI", mainPanel);
 
-            var innerXPBar1 = new CuiElement
-            {
-                Name = CuiHelper.GetGuid(),
-                Parent = mainPanel,
-                Components =
-                {
-                    new CuiImageComponent { Color = config.cui.cuiXpBarBackground },
-                    new CuiRectTransformComponent{ AnchorMin = "0.190 0.05", AnchorMax = "0.750 0.8" }
-                }
-            };
-            container.Add(innerXPBar1);
-
-            var innerXPBarProgress1 = new CuiElement
-            {
-                Name = CuiHelper.GetGuid(),
-                Parent = innerXPBar1.Name,
-                Components =
-                {
-                    new CuiImageComponent() { Color = config.cui.cuiColors.Get(skill) },
-                    new CuiRectTransformComponent{ AnchorMin = "0 0", AnchorMax = (percent / 100.0) + " 0.95" }
-                }
-            };
-            container.Add(innerXPBarProgress1);
+            string xpBar = AddCuiImage(container, config.cui.cuiXpBarBackground, "0.190 0.05", "0.750 0.8", "0 0", "0 0", mainPanel);
+            AddCuiImage(container, config.cui.cuiColors.Get(skill), "0 0", (percent / 100.0) + " 0.95", "0 0", "0 0", xpBar);
 
             if (config.cui.cuiTextShadow)
             {
-                var innerXPBarTextShadow1 = new CuiElement
-                {
-                    Name = CuiHelper.GetGuid(),
-                    Parent = innerXPBar1.Name,
-                    Components =
-                    {
-                        new CuiTextComponent { Color = "0.1 0.1 0.1 0.75", Text = skillName, FontSize = config.cui.cuiFontSizeBar, Align = TextAnchor.MiddleCenter},
-                        new CuiRectTransformComponent{ AnchorMin = "0.035 -0.1", AnchorMax = "1 1" }
-                    }
-                };
-                container.Add(innerXPBarTextShadow1);
+                AddCuiText(container, skillName, config.cui.cuiFontSizeBar, TextAnchor.MiddleCenter, "0.1 0.1 0.1 0.5", "0.035 -0.1", "1 1", "0 0", "0 0", xpBar);
             }
 
-            var innerXPBarText1 = new CuiElement
-            {
-                Name = CuiHelper.GetGuid(),
-                Parent = innerXPBar1.Name,
-                Components =
-                {
-                    new CuiTextComponent { Color = config.cui.cuiFontColor, Text = skillName, FontSize = config.cui.cuiFontSizeBar, Align = TextAnchor.MiddleCenter},
-                    new CuiRectTransformComponent{ AnchorMin = "0.05 0", AnchorMax = "1 1" }
-                }
-            };
-            container.Add(innerXPBarText1);
+            AddCuiText(container, skillName, config.cui.cuiFontSizeBar, TextAnchor.MiddleCenter, config.cui.cuiFontColor, "0.05 0", "1 1", "0 0", "0 0", xpBar);
 
+            string levelText = $"{L("Lv.")}{level:0}";
             if (config.cui.cuiTextShadow)
             {
-                var lvShader1 = new CuiElement
-                {
-                    Name = CuiHelper.GetGuid(),
-                    Parent = mainPanel,
-                    Components =
-                    {
-                        new CuiTextComponent { Text = $"{_("Lv.", player.UserIDString)}{level:0}", FontSize = config.cui.cuiFontSizeLvl , Align = TextAnchor.MiddleLeft, Color = "0.1 0.1 0.1 0.75" },
-                        new CuiRectTransformComponent{ AnchorMin = "0.035 -0.1", AnchorMax = $"0.5 1" }
-                    }
-                };
-                container.Add(lvShader1);
+                AddCuiText(container, levelText, config.cui.cuiFontSizeLvl, TextAnchor.MiddleLeft, "0.1 0.1 0.1 0.5", "0.028 -0.1", "0.5 1", "0 0", "0 0", mainPanel);
             }
 
-            var lvText1 = new CuiElement
-            {
-                Name = CuiHelper.GetGuid(),
-                Parent = mainPanel,
-                Components =
-                {
-                    new CuiTextComponent { Text = $"{_("Lv.", player.UserIDString)}{level:0}", FontSize = config.cui.cuiFontSizeLvl, Align = TextAnchor.MiddleLeft, Color = config.cui.cuiFontColor },
-                    new CuiRectTransformComponent{ AnchorMin = "0.025 0", AnchorMax = $"0.5 1" }
-                }
-            };
+            AddCuiText(container, levelText, config.cui.cuiFontSizeLvl, TextAnchor.MiddleLeft, config.cui.cuiFontColor, "0.025 0", "0.5 1", "0 0", "0 0", mainPanel);
 
-            container.Add(lvText1);
-
+            string percentText = isMaxLevel ? L("MAX") : $"{percent:N2}%";
             if (config.cui.cuiTextShadow)
             {
-                var percShader1 = new CuiElement
-                {
-                    Name = CuiHelper.GetGuid(),
-                    Parent = mainPanel,
-                    Components =
-                    {
-                        new CuiTextComponent { Text = isMaxLevel ? _("MAX", player.UserIDString) : $"{percent:N2}%", FontSize = config.cui.cuiFontSizePercent, Align = TextAnchor.MiddleRight, Color = "0.1 0.1 0.1 0.75" },
-                        new CuiRectTransformComponent{ AnchorMin = "0.5 -0.1", AnchorMax = $"1 1" }
-                    }
-                };
-                container.Add(percShader1);
+                AddCuiText(container, percentText, config.cui.cuiFontSizePercent, TextAnchor.MiddleRight, "0.1 0.1 0.1 0.75", "0.5 -0.1", "1 1", "0 0", "0 0", mainPanel);
             }
 
-            var percText1 = new CuiElement
-            {
-                Name = CuiHelper.GetGuid(),
-                Parent = mainPanel,
-                Components =
-                {
-                    new CuiTextComponent { Text = isMaxLevel ? _("MAX", player.UserIDString) : $"{percent:N2}%", FontSize = config.cui.cuiFontSizePercent, Align = TextAnchor.MiddleRight, Color = config.cui.cuiFontColor },
-                    new CuiRectTransformComponent{ AnchorMin = "0.5 0", AnchorMax = $"1 1" }
-                }
-            };
-            container.Add(percText1);
+            AddCuiText(container, percentText, config.cui.cuiFontSizePercent, TextAnchor.MiddleRight, config.cui.cuiFontColor, "0.5 0", "1 1", "0 0", "0 0", mainPanel);
             CuiHelper.AddUi(player, container);
         }
 
         private void DestroyGUI(BasePlayer player)
         {
             CuiHelper.DestroyUi(player, "ZLevelsUI");
+            CuiHelper.DestroyUi(player, "ZLevelsUIMove");
+            uiMovePlayers.Remove(player.userID);
         }
 
-        private void CreateGUI(BasePlayer player, PlayerInfo pi)
+        private void OnCuiDraggableDrag(BasePlayer player, string name, Vector3 position, CommunityEntity.DraggablePositionSendType dragType)
         {
-            if (!config.cui.cuiEnabled || pi is null || !pi.ENABLED || !pi.CUI || !hasRights(player.UserIDString) || !player.IsAlive() || player.IsSleeping())
+            if (!config.cui.IsEnabled || name != "ZLevelsUI" || !hasRights(player))
             {
                 return;
             }
 
-            var panelName = "ZLevelsUI";
-            CuiHelper.DestroyUi(player, panelName);
-            var mainContainer = new CuiElementContainer()
+            var pi = GetPlayerInfo(player);
+            if (!pi.CUI || !pi.ENABLED) return;
+
+            Vector2 anchor;
+            switch (dragType)
             {
-                {
-                    new CuiPanel
-                    {
-                        Image = {Color = "0 0 0 0"},
-                        RectTransform = {AnchorMin = $"{config.cui.cuiPositioning.widthLeft} {config.cui.cuiPositioning.heightLower}", AnchorMax =$"{config.cui.cuiPositioning.widthRight} {config.cui.cuiPositioning.heightUpper}"},
-                        CursorEnabled = false
-                    },
-                    new CuiElement().Parent = "Under",
-                    panelName
-                }
+                case CommunityEntity.DraggablePositionSendType.NormalizedParent:
+                    anchor = new(Mathf.Clamp01(position.x), Mathf.Clamp01(position.y));
+                    break;
+                case CommunityEntity.DraggablePositionSendType.NormalizedScreen:
+                    anchor = new(Mathf.Clamp01(position.x), 1f - Mathf.Clamp01(position.y));
+                    break;
+                default:
+                    return;
+            }
+
+            data.UiPositions[player.userID] = anchor;
+            UpdateMoveButton(player, anchor);
+        }
+
+        private string GetUiParent(BasePlayer player)
+        {
+            if (!uiMovePlayers.Contains(player.userID)) return config.cui.UiPanelString;
+
+            return config.cui.UiPanel switch
+            {
+                ClientPanels.Overall or ClientPanels.Overlay or ClientPanels.OverlayNonScaled => config.cui.UiPanelString,
+                ClientPanels.UnderNonScaled => nameof(ClientPanels.OverlayNonScaled),
+                _ => nameof(ClientPanels.Overlay)
             };
+        }
+
+        private void UpdateGUIPosition(BasePlayer player)
+        {
+            if (!config.cui.IsEnabled || !hasRights(player) || !player.IsConnected || !player.IsAlive() || player.IsSleeping()) return;
+            var pi = GetPlayerInfo(player);
+            if (!pi.CUI || !pi.ENABLED) return;
+            var offsets = config.cui.cuiPositioning;
+            Vector2 anchor = data.UiPositions.TryGetValue(player.userID, out var position) ? position : offsets.NormalizedAnchor;
+            string anchorString = Vec2ToString(anchor);
+            GetUiOffsets(out Vector2 min, out Vector2 max);
+            var container = new CuiElementContainer();
+            AddCuiRectTransformUpdate(container, anchorString, anchorString, Vec2ToString(min), Vec2ToString(max), GetUiParent(player), "ZLevelsUI");
+            CuiHelper.AddUi(player, container);
+            UpdateMoveButton(player, anchor);
+        }
+
+        private void UpdateMoveButton(BasePlayer player, Vector2 anchor)
+        {
+            bool moving = uiMovePlayers.Contains(player.userID);
+            if (!moving && (config.cui.MoveButtonPanel == ClientPanels.None || GetPlayerInfo(player).CUIMOVE)) return;
+
+            GetMoveButtonOffsets(anchor, out Vector2 min, out Vector2 max);
+            string anchorString = moving ? "0.5 0.5" : Vec2ToString(anchor);
+            string parent = moving ? "ZLevelsUI" : config.cui.MoveButtonPanelString;
+            var container = new CuiElementContainer();
+            AddCuiRectTransformUpdate(container, anchorString, anchorString, Vec2ToString(min), Vec2ToString(max), parent, "ZLevelsUIMove");
+            CuiHelper.AddUi(player, container);
+        }
+
+        private void GetUiOffsets(out Vector2 min, out Vector2 max)
+        {
+            var offsets = config.cui.cuiPositioning;
+            float scale = Mathf.Max(0.1f, config.cui.cuiScale);
+            Vector2 size = (offsets.Max - offsets.Min) * scale;
+            size.y *= Mathf.Max(5, skillIndex.Count) / 5f;
+            min = size * -0.5f;
+            max = size * 0.5f;
+        }
+
+        private void GetMoveButtonOffsets(Vector2 anchor, out Vector2 min, out Vector2 max)
+        {
+            GetUiOffsets(out Vector2 panelMin, out Vector2 panelMax);
+            float right = panelMax.x;
+            const float width = 42f;
+            const float height = 16f;
+            const float gap = 2f;
+
+            if (anchor.y > 0.5f)
+            {
+                float top = panelMin.y - gap;
+                min = new(right - width, top - height);
+                max = new(right, top);
+            }
+            else
+            {
+                float bottom = panelMax.y + gap;
+                min = new(right - width, bottom);
+                max = new(right, bottom + height);
+            }
+        }
+
+        private void CreateGUI(BasePlayer player, PlayerInfo pi)
+        {
+            if (!config.cui.IsEnabled || pi == null || !pi.ENABLED || !pi.CUI || !hasRights(player) || !player.IsConnected || !player.IsAlive() || player.IsSleeping())
+            {
+                return;
+            }
+
+            const string panelName = "ZLevelsUI";
+            bool moving = uiMovePlayers.Contains(player.userID);
+            CuiHelper.DestroyUi(player, "ZLevelsUIMove");
+            var offsets = config.cui.cuiPositioning;
+            Vector2 anchor = data.UiPositions.TryGetValue(player.userID, out var position) ? position : offsets.NormalizedAnchor;
+            string anchorString = Vec2ToString(anchor);
+            GetUiOffsets(out Vector2 offsetMin, out Vector2 offsetMax);
+
+            var mainContainer = new CuiElementContainer();
+            AddCuiPanel(mainContainer, "0 0 0 0", anchorString, anchorString, Vec2ToString(offsetMin), Vec2ToString(offsetMax), GetUiParent(player), panelName, cursor: moving, draggable: true);
+
+            if (moving || config.cui.MoveButtonPanel != ClientPanels.None && !pi.CUIMOVE)
+            {
+                string parent = moving ? panelName : config.cui.MoveButtonPanelString;
+                string buttonAnchor = moving ? "0.5 0.5" : anchorString;
+                GetMoveButtonOffsets(anchor, out Vector2 btnOffsetMin, out Vector2 btnOffsetMax);
+                AddCuiButton(mainContainer, Localize(moving ? "DONE" : "MOVE", player.UserIDString), 9, moving ? "0.18 0.24 0.31 1" : "0.18 0.24 0.31 0.3", "0.85 0.9 0.95 0.75", buttonAnchor, buttonAnchor, Vec2ToString(btnOffsetMin), Vec2ToString(btnOffsetMax), parent, "ZLevelsUIMove", "zl.ui.move");
+            }
+
             CuiHelper.AddUi(player, mainContainer);
-            foreach (Skills skill in _allSkills)
+
+            foreach (Skills skill in AllSkills)
                 if (IsSkillEnabled(skill))
                     GUIUpdateSkill(player, skill);
+        }
+
+        private static void AddCuiPanel(CuiElementContainer container, string color, string amin, string amax, string omin, string omax, string parent, string name, bool cursor = false, bool draggable = false)
+        {
+            CuiPanel panel = new()
+            {
+                CursorEnabled = cursor,
+                Image = { Color = color },
+                RectTransform = { AnchorMin = amin, AnchorMax = amax, OffsetMin = omin, OffsetMax = omax }
+            };
+
+            if (!draggable)
+            {
+                container.Add(panel, parent, name, name);
+                return;
+            }
+
+            CuiElement host = new()
+            {
+                Name = name,
+                Parent = parent,
+                DestroyUi = name
+            };
+
+            if (panel.Image != null) host.Components.Add(panel.Image);
+            if (panel.RawImage != null) host.Components.Add(panel.RawImage);
+            if (panel.RectTransform != null) host.Components.Add(panel.RectTransform);
+            if (panel.CursorEnabled) host.Components.Add(new CuiNeedsCursorComponent());
+            host.Components.Add(new CuiDraggableComponent
+            {
+                LimitToParent = true,
+                MaxDistance = -1f,
+                AllowSwapping = false,
+                DropAnywhere = true,
+                DragAlpha = 0.98f,
+                Filter = null,
+                ParentLimitIndex = 1,
+                ParentPadding = "0 0",
+                AnchorOffset = "0 0",
+                KeepOnTop = false,
+                PositionRPC = CommunityEntity.DraggablePositionSendType.NormalizedParent,
+                Enabled = true
+            });
+            container.Add(host);
+        }
+
+        private static string AddCuiImage(CuiElementContainer container, string color, string amin, string amax, string omin, string omax, string parent, string name = null)
+        {
+            name ??= CuiHelper.GetGuid();
+            container.Add(new CuiElement
+            {
+                Name = name,
+                Parent = parent,
+                Components =
+                {
+                    new CuiImageComponent { Color = color },
+                    new CuiRectTransformComponent { AnchorMin = amin, AnchorMax = amax, OffsetMin = omin, OffsetMax = omax }
+                }
+            });
+            return name;
+        }
+
+        private static string AddCuiText(CuiElementContainer container, string text, int fontSize, TextAnchor align, string color, string amin, string amax, string omin, string omax, string parent, string name = null)
+        {
+            name ??= CuiHelper.GetGuid();
+            container.Add(new CuiElement
+            {
+                Name = name,
+                Parent = parent,
+                Components =
+                {
+                    new CuiTextComponent { Text = text, FontSize = fontSize, Align = align, Color = color },
+                    new CuiRectTransformComponent { AnchorMin = amin, AnchorMax = amax, OffsetMin = omin, OffsetMax = omax }
+                }
+            });
+            return name;
+        }
+
+        private static string AddCuiButton(CuiElementContainer container, string text, int fontSize, string color, string textColor, string amin, string amax, string omin, string omax, string parent, string name, string command)
+        {
+            container.Add(new CuiButton
+            {
+                Button = { Color = color, Command = command },
+                Text = { Text = text, FontSize = fontSize, Align = TextAnchor.MiddleCenter, Color = textColor },
+                RectTransform = { AnchorMin = amin, AnchorMax = amax, OffsetMin = omin, OffsetMax = omax }
+            }, parent, name, name);
+            return name;
+        }
+
+        private static void AddCuiRectTransformUpdate(CuiElementContainer container, string anchorMin, string anchorMax, string offsetMin, string offsetMax, string parent, string name)
+        {
+            container.Add(new CuiElement { Name = name, Parent = parent, Update = true, Components = { new CuiRectTransformComponent { AnchorMin = anchorMin, AnchorMax = anchorMax, OffsetMin = offsetMin, OffsetMax = offsetMax } } });
+        }
+
+        private static string Vec2ToString(Vector2 value) => $"{value.x.ToString("0.######", CultureInfo.InvariantCulture)} {value.y.ToString("0.######", CultureInfo.InvariantCulture)}";
+
+        private static bool TryParse(string value, out float result) => float.TryParse(value?.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out result);
+
+        private static bool TryParseOffset(string value, out Vector2 result)
+        {
+            result = default;
+            if (string.IsNullOrWhiteSpace(value)) return false;
+            string[] split = value.Trim('(', ')', ' ').Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
+            return split.Length == 2 && TryParse(split[0], out result.x) && TryParse(split[1], out result.y);
         }
 
         private PlayerInfo GetPlayerInfo(BasePlayer player)
@@ -2250,15 +2580,17 @@ namespace Oxide.Plugins
                 SKINNING_POINTS = config.settings.stats.skinning_points,
                 WOODCUTTING_LEVEL = config.settings.stats.woodcutting_level,
                 WOODCUTTING_POINTS = config.settings.stats.woodcutting_points,
+                FISHING_LEVEL = config.settings.stats.fishing_level,
+                FISHING_POINTS = config.settings.stats.fishing_points,
                 XP_MULTIPLIER = config.settings.stats.xpm
             };
         }
 
         private PlayerInfo GetPlayerInfo(ulong userID)
         {
-            if (!_storedData.PlayerInfo.TryGetValue(userID, out var pi))
+            if (!data.PlayerInfo.TryGetValue(userID, out var pi))
             {
-                _storedData.PlayerInfo[userID] = pi = CreatePlayerInfo();
+                data.PlayerInfo[userID] = pi = CreatePlayerInfo();
 
                 pi.LAST_DEATH = ToEpochTime(DateTime.UtcNow);
                 pi.CUI = config.generic.playerCuiDefaultEnabled;
@@ -2275,100 +2607,136 @@ namespace Oxide.Plugins
         private class Configuration
         {
             [JsonProperty(PropertyName = "CUI")]
-            public ConfigurationCui cui { get; set; } = new();
+            public ConfigurationCui cui = new();
 
             [JsonProperty(PropertyName = "Functions")]
-            public ConfigurationFunctions functions { get; set; } = new();
+            public ConfigurationFunctions functions = new();
 
             [JsonProperty(PropertyName = "Generic")]
-            public ConfigurationGeneric generic { get; set; } = new();
+            public ConfigurationGeneric generic = new();
 
             [JsonProperty(PropertyName = "Night Bonus")]
-            public ConfigurationNightBonus nightbonus { get; set; } = new();
+            public ConfigurationNightBonus nightbonus = new();
 
             [JsonProperty(PropertyName = "Settings")]
-            public ConfigurationSettings settings { get; set; } = new();
+            public ConfigurationSettings settings = new();
 
             [JsonProperty(PropertyName = "Level Up Rewards (Reward * Level = Amount)")]
-            public Rewards Rewards { get; set; } = new();
+            public Rewards Rewards = new();
         }
 
         private class ConfigurationCui
         {
+            private static bool TryGetClientPanel(string value, out ClientPanels panel) => Enum.TryParse(value?.Replace(".", "") ?? "None", true, out panel) && Enum.IsDefined(typeof(ClientPanels), panel);
+            internal string MoveButtonPanelString => MoveButtonPanel == ClientPanels.HudMenu ? "Hud.Menu" : MoveButtonPanel.ToString();
+            internal string UiPanelString => UiPanel == ClientPanels.HudMenu ? "Hud.Menu" : UiPanel.ToString();
+            internal bool IsEnabled => cuiEnabled && UiPanel != ClientPanels.None;
+            internal ClientPanels UiPanel = ClientPanels.Under, MoveButtonPanel = ClientPanels.Overlay;
+
+            public void Normalize()
+            {
+                cuiColors ??= new("0.4 0 0.8 0.5", "0 1 0 0.5", "0 0 1 0.5", "1 0 0 0.5", "1 0.6 0 0.5", "0 0.75 1 0.5");
+                cuiPositioning ??= new();
+                cuiPositioning.ConvertOldBounds();
+                if (string.IsNullOrWhiteSpace(cuiColors.FISHING)) cuiColors.FISHING = "0 0.75 1 0.5";
+                if (displayOnOverlay.HasValue) { UiPanelValue = displayOnOverlay.Value ? nameof(ClientPanels.Overlay) : nameof(ClientPanels.Under); displayOnOverlay = null; }
+                UiPanel = TryGetClientPanel(UiPanelValue, out var panel1) ? panel1 : ClientPanels.Under;
+                MoveButtonPanel = TryGetClientPanel(MoveButtonPanelValue, out var panel2) ? panel2 : ClientPanels.Overlay;
+                MoveButtonPanelValue = MoveButtonPanelString;
+                UiPanelValue = UiPanelString;
+            }
+
             [JsonProperty(PropertyName = "Bounds")]
-            public ConfigurationCuiPositions cuiPositioning { get; set; } = new("0.725", "0.83", "0.02", "0.1225");
+            public ConfigurationCuiPositions cuiPositioning = new();
+
+            [JsonProperty(PropertyName = "UI Scale")]
+            public float cuiScale = 1.5f;
+
+            [JsonProperty(PropertyName = "Display on Overlay", NullValueHandling = NullValueHandling.Ignore)]
+            public bool? displayOnOverlay;
+
+            [JsonProperty(PropertyName = "UI Client Panel")]
+            public string UiPanelValue = nameof(ClientPanels.Under);
+
+            [JsonProperty(PropertyName = "Move Button Client Panel")]
+            public string MoveButtonPanelValue = nameof(ClientPanels.Overlay);
 
             [JsonProperty(PropertyName = "Xp Bar Colors")]
-            public ConfigurationColors cuiColors { get; set; } = new("0.4 0 0.8 0.5", "0 1 0 0.5", "0 0 1 0.5", "1 0 0 0.5", "1 0.6 0 0.5");
+            public ConfigurationColors cuiColors = new("0.4 0 0.8 0.5", "0 1 0 0.5", "0 0 1 0.5", "1 0 0 0.5", "1 0.6 0 0.5", "0 0.75 1 0.5");
 
             [JsonProperty(PropertyName = "Bounds Background")]
-            public string cuiBoundsBackground { get; set; } = "0.1 0.1 0.1 0.1";
+            public string cuiBoundsBackground = "0.1 0.1 0.1 0.1";
 
             [JsonProperty(PropertyName = "CUI Enabled")]
-            public bool cuiEnabled { get; set; } = true;
+            public bool cuiEnabled = true;
 
             [JsonProperty(PropertyName = "Font Color")]
-            public string cuiFontColor { get; set; } = "0.74 0.76 0.78 1";
+            public string cuiFontColor = "0.74 0.76 0.78 1";
 
             [JsonProperty(PropertyName = "FontSize Bar")]
-            public int cuiFontSizeBar { get; set; } = 11;
+            public int cuiFontSizeBar = 11;
 
             [JsonProperty(PropertyName = "FontSize Level")]
-            public int cuiFontSizeLvl { get; set; } = 11;
+            public int cuiFontSizeLvl = 11;
 
             [JsonProperty(PropertyName = "FontSize Percent")]
-            public int cuiFontSizePercent { get; set; } = 11;
+            public int cuiFontSizePercent = 11;
 
             [JsonProperty(PropertyName = "Text Shadow Enabled")]
-            public bool cuiTextShadow { get; set; } = true;
+            public bool cuiTextShadow = true;
 
             [JsonProperty(PropertyName = "Xp Bar Background")]
-            public string cuiXpBarBackground { get; set; } = "0.2 0.2 0.2 0.2";
+            public string cuiXpBarBackground = "0.2 0.2 0.2 0.2";
         }
 
         private class ConfigurationFunctions
         {
             [JsonProperty(PropertyName = "Collectible Entities", ObjectCreationHandling = ObjectCreationHandling.Replace)]
-            public Dictionary<string, bool> enabledCollectibleEntity { get; set; } = new();
+            public Dictionary<string, bool> enabledCollectibleEntity = new();
 
             [JsonProperty(PropertyName = "Enable Collectible Pickup")]
-            public bool enableCollectiblePickup { get; set; } = true;
+            public bool enableCollectiblePickup = true;
+
+            [JsonProperty(PropertyName = "Collectible Pickup Hook")]
+            public string collectiblePickupHook = "OnCollectiblePickup";
+
+            internal string GetCollectiblePickupHook => collectiblePickupHook.Equals(nameof(OnCollectiblePickedup), StringComparison.OrdinalIgnoreCase) ? nameof(OnCollectiblePickedup) : nameof(OnCollectiblePickup);
 
             [JsonProperty(PropertyName = "Enable Crop Gather")]
-            public bool enableCropGather { get; set; } = true;
+            public bool enableCropGather = true;
 
             [JsonProperty(PropertyName = "Enable Wood Gather")]
-            public bool wood { get; set; } = true;
+            public bool wood = true;
 
             [JsonProperty(PropertyName = "Grant Wood XP Only")]
-            public bool woodXpOnly { get; set; }
+            public bool woodXpOnly;
 
             [JsonProperty(PropertyName = "Enable Stone Ore Gather")]
-            public bool stone { get; set; } = true;
+            public bool stone = true;
 
             [JsonProperty(PropertyName = "Grant Stone XP Only")]
-            public bool stoneXpOnly { get; set; }
+            public bool stoneXpOnly;
 
             [JsonProperty(PropertyName = "Enable Sulfur Ore Gather")]
-            public bool sulfur { get; set; } = true;
+            public bool sulfur = true;
 
             [JsonProperty(PropertyName = "Grant Sulfur XP Only")]
-            public bool sulfurXpOnly { get; set; }
+            public bool sulfurXpOnly;
 
             [JsonProperty(PropertyName = "Enable Metal Gather")]
-            public bool metal { get; set; } = true;
+            public bool metal = true;
 
             [JsonProperty(PropertyName = "Grant Metal XP Only")]
-            public bool metalXpOnly { get; set; }
+            public bool metalXpOnly;
 
             [JsonProperty(PropertyName = "Enable HQM Gather")]
-            public bool hqm { get; set; } = true;
+            public bool hqm = true;
 
             [JsonProperty(PropertyName = "Grant HQM XP Only")]
-            public bool hqmXpOnly { get; set; }
+            public bool hqmXpOnly;
 
             [JsonProperty(PropertyName = "Allow Mining Multiplier On Gibs")]
-            public bool gibs { get; set; } = true;
+            public bool gibs = true;
 
             internal bool enableDispenserGather => wood || stone || sulfur || metal || hqm || woodXpOnly || stoneXpOnly || sulfurXpOnly || metalXpOnly || hqmXpOnly;
 
@@ -2392,46 +2760,46 @@ namespace Oxide.Plugins
         private class ConfigurationGeneric
         {
             [JsonProperty(PropertyName = "Enable Level Up Broadcast")]
-            public bool enableLevelupBroadcast { get; set; }
+            public bool enableLevelupBroadcast;
 
             [JsonProperty(PropertyName = "Enable Permission")]
-            public bool enablePermission { get; set; }
+            public bool enablePermission;
 
             [JsonProperty(PropertyName = "Chainsaw On Gather Permission")]
-            public string AllowChainsawGather { get; set; } = "zlevelsremastered.chainsaw.allowed";
+            public string AllowChainsawGather = "zlevelsremastered.chainsaw.allowed";
 
             [JsonProperty(PropertyName = "Jackhammer On Gather Permission")]
-            public string AllowJackhammerGather { get; set; } = "zlevelsremastered.jackhammer.allowed";
+            public string AllowJackhammerGather = "zlevelsremastered.jackhammer.allowed";
 
             [JsonProperty(PropertyName = "Weapons On Gather Permission")]
-            public string BlockWeaponsGather { get; set; } = "zlevelsremastered.weapons.blocked";
+            public string BlockWeaponsGather = "zlevelsremastered.weapons.blocked";
 
             [JsonProperty(PropertyName = "gameProtocol")]
-            public int gameProtocol { get; set; } = Protocol.network;
+            public int gameProtocol = Protocol.network;
 
             [JsonProperty(PropertyName = "Penalty Minutes")]
-            public int penaltyMinutes { get; set; } = 10;
+            public int penaltyMinutes = 10;
 
             [JsonProperty(PropertyName = "Penalty Minutes (Suicide)")]
-            public int penaltySuicideMinutes { get; set; } = 10;
+            public int penaltySuicideMinutes = 10;
 
             [JsonProperty(PropertyName = "Penalty Resets All Levels To Default")]
-            public bool penaltyReset { get; set; }
+            public bool penaltyReset;
 
             [JsonProperty(PropertyName = "Penalty On Death")]
-            public bool penaltyOnDeath { get; set; } = true;
+            public bool penaltyOnDeath = true;
 
             [JsonProperty(PropertyName = "Penalty On Suicide")]
-            public bool penaltyOnSuicide { get; set; }
+            public bool penaltyOnSuicide;
 
             [JsonProperty(PropertyName = "Permission Name")]
-            public string permissionName { get; set; } = "zlevelsremastered.use";
+            public string permissionName = "zlevelsremastered.use";
 
             [JsonProperty(PropertyName = "Permission Name XP")]
-            public string permissionNameXP { get; set; } = "zlevelsremastered.noxploss";
+            public string permissionNameXP = "zlevelsremastered.noxploss";
 
             [JsonProperty(PropertyName = "Additional Boost Multipliers")]
-            public Dictionary<string, double> vip { get; set; } = new()
+            public Dictionary<string, double> vip = new()
             {
                 ["zlevelsremastered.vip1"] = 2.0,
                 ["zlevelsremastered.vip2"] = 3.0,
@@ -2442,148 +2810,161 @@ namespace Oxide.Plugins
             };
 
             [JsonProperty(PropertyName = "Permission Name No Wipes")]
-            public string nowipe { get; set; } = "zlevelsremastered.nowipes";
+            public string nowipe = "zlevelsremastered.nowipes";
 
             [JsonProperty(PropertyName = "Player CUI Default Enabled")]
-            public bool playerCuiDefaultEnabled { get; set; } = true;
+            public bool playerCuiDefaultEnabled = true;
 
             [JsonProperty(PropertyName = "Player Plugin Default Enabled")]
-            public bool playerPluginDefaultEnabled { get; set; } = true;
+            public bool playerPluginDefaultEnabled = true;
 
             [JsonProperty(PropertyName = "Plugin Prefix")]
-            public string pluginPrefix { get; set; } = "<color=orange>ZLevels</color>: ";
+            public string pluginPrefix = "<color=orange>ZLevels</color>: ";
 
             [JsonProperty(PropertyName = "SteamID Icon")]
-            public ulong steamIDIcon { get; set; }
+            public ulong steamIDIcon;
 
             [JsonProperty(PropertyName = "Wipe Data OnNewSave")]
-            public bool wipeDataOnNewSave { get; set; }
+            public bool wipeDataOnNewSave;
         }
 
         private class ConfigurationNightBonus
         {
             [JsonProperty(PropertyName = "Points Per Hit At Night")]
-            public ConfigurationResources pointsPerHitAtNight { get; set; } = new(60, null, 60, 60, 60);
+            public ConfigurationResources pointsPerHitAtNight = new(60, null, 60, 60, 60);
 
             [JsonProperty(PropertyName = "Points Per PowerTool At Night")]
-            public ConfigurationResources pointsPerPowerToolAtNight { get; set; } = new(null, null, 60, null, 60);
+            public ConfigurationResources pointsPerPowerToolAtNight = new(null, null, 60, null, 60);
 
             [JsonProperty(PropertyName = "Resource Per Level Multiplier At Night")]
-            public ConfigurationResources resourceMultipliersAtNight { get; set; } = new(2, null, 2, 2, 2);
+            public ConfigurationResources resourceMultipliersAtNight = new(2, null, 2, 2, 2);
 
             [JsonProperty(PropertyName = "Enable Night Bonus")]
-            public bool enableNightBonus { get; set; }
+            public bool enableNightBonus;
 
             [JsonProperty(PropertyName = "Broadcast Enabled Bonus")]
-            public bool broadcastEnabledBonus { get; set; } = true;
+            public bool broadcastEnabledBonus = true;
 
             [JsonProperty(PropertyName = "Log Enabled Bonus Console")]
-            public bool logEnabledBonusConsole { get; set; }
+            public bool logEnabledBonusConsole;
         }
 
         private class ConfigurationSettings
         {
             [JsonProperty(PropertyName = "Crafting Details", ObjectCreationHandling = ObjectCreationHandling.Replace)]
-            public ConfigurationCraftingDetails craftingDetails { get; set; } = new(1, 3, 5);
+            public ConfigurationCraftingDetails craftingDetails = new(1, 3, 5);
+
+            [JsonProperty(PropertyName = "Fishing Details")]
+            public ConfigurationFishingDetails fishingDetails = new();
 
             [JsonProperty(PropertyName = "Default Resource Multiplier")]
-            public ConfigurationResources defaultMultipliers { get; set; } = new(1, null, 1, 1, 1);
+            public ConfigurationResources defaultMultipliers = new(1, null, 1, 1, 1);
 
             [JsonProperty(PropertyName = "Level Caps")]
-            public ConfigurationResources levelCaps { get; set; } = new(200, 20, 200, 200, 200);
+            public ConfigurationResources levelCaps = new(200, 20, 200, 200, 200, 200);
 
             [JsonProperty(PropertyName = "Percent Lost On Death")]
-            public ConfigurationResources percentLostOnDeath { get; set; } = new(50, 50, 50, 50, 50);
+            public ConfigurationResources percentLostOnDeath = new(50, 50, 50, 50, 50, 50);
 
             [JsonProperty(PropertyName = "Percent Lost On Suicide")]
-            public ConfigurationResources percentLostOnSuicide { get; set; } = new(0, 0, 0, 0, 0);
+            public ConfigurationResources percentLostOnSuicide = new(0, 0, 0, 0, 0, 0);
 
             [JsonProperty(PropertyName = "No Penalty Zones", ObjectCreationHandling = ObjectCreationHandling.Replace)]
-            public List<string> zones { get; set; } = new() { "adminzone1", "999999" };
+            public List<string> zones = new() { "adminzone1", "999999" };
 
             [JsonProperty(PropertyName = "Points Per Hit")]
-            public ConfigurationResources pointsPerHit { get; set; } = new(30, null, 30, 30, 30);
+            public ConfigurationResources pointsPerHit = new(30, null, 30, 30, 30);
 
             [JsonProperty(PropertyName = "Points Per Power Tool")]
-            public ConfigurationResources pointsPerPowerTool { get; set; } = new(null, null, 30, null, 30);
+            public ConfigurationResources pointsPerPowerTool = new(null, null, 30, null, 30);
 
             [JsonProperty(PropertyName = "Resource Per Level Multiplier")]
-            public ConfigurationResources resourceMultipliers { get; set; } = new(2, null, 2, 2, 2);
+            public ConfigurationResources resourceMultipliers = new(2, null, 2, 2, 2);
 
             [JsonProperty(PropertyName = "Skill Colors")]
-            public ConfigurationSkillColors colors { get; set; } = new();
+            public ConfigurationSkillColors colors = new();
 
             [JsonProperty(PropertyName = "Starting Stats")]
-            public ConfigurationStartingStats stats { get; set; } = new();
+            public ConfigurationStartingStats stats = new();
 
             [JsonProperty(PropertyName = "Use Mining Skill When Picking Up Stones And Ore")]
-            public bool MiningStonesOre { get; set; } = true;
+            public bool MiningStonesOre = true;
 
             [JsonProperty(PropertyName = "Use Acquire Skill When Picking Up Wood")]
-            public bool AcquireWood { get; set; }
+            public bool AcquireWood;
         }
 
         public class ConfigurationStartingStats
         {
             [JsonProperty(PropertyName = "Acquire Level")]
-            public double acquire_level { get; set; } = 1.0;
+            public double acquire_level = 1.0;
 
             [JsonProperty(PropertyName = "Acquire Points")]
-            public double acquire_points { get; set; } = 10.0;
+            public double acquire_points = 10.0;
 
             [JsonProperty(PropertyName = "Crafting Level")]
-            public double crafting_level { get; set; } = 1.0;
+            public double crafting_level = 1.0;
 
             [JsonProperty(PropertyName = "Crafting Points")]
-            public double crafting_points { get; set; } = 10.0;
+            public double crafting_points = 10.0;
 
             [JsonProperty(PropertyName = "Mining Level")]
-            public double mining_level { get; set; } = 1.0;
+            public double mining_level = 1.0;
 
             [JsonProperty(PropertyName = "Mining Points")]
-            public double mining_points { get; set; } = 10.0;
+            public double mining_points = 10.0;
 
             [JsonProperty(PropertyName = "Skinning Level")]
-            public double skinning_level { get; set; } = 1.0;
+            public double skinning_level = 1.0;
 
             [JsonProperty(PropertyName = "Skinning Points")]
-            public double skinning_points { get; set; } = 10.0;
+            public double skinning_points = 10.0;
 
             [JsonProperty(PropertyName = "Woodcutting Level")]
-            public double woodcutting_level { get; set; } = 1.0;
+            public double woodcutting_level = 1.0;
 
             [JsonProperty(PropertyName = "Woodcutting Points")]
-            public double woodcutting_points { get; set; } = 10.0;
+            public double woodcutting_points = 10.0;
+
+            [JsonProperty(PropertyName = "Fishing Level")]
+            public double fishing_level = 1.0;
+
+            [JsonProperty(PropertyName = "Fishing Points")]
+            public double fishing_points = 10.0;
 
             [JsonProperty(PropertyName = "XP Multiplier")]
-            public double xpm { get; set; } = 100.0;
+            public double xpm = 100.0;
 
         }
 
         public class ConfigurationResources
         {
             [JsonProperty(PropertyName = nameof(Skills.ACQUIRE), NullValueHandling = NullValueHandling.Ignore)]
-            public double? ACQUIRE { get; set; }
+            public double? ACQUIRE;
 
             [JsonProperty(PropertyName = nameof(Skills.CRAFTING), NullValueHandling = NullValueHandling.Ignore)]
-            public double? CRAFTING { get; set; }
+            public double? CRAFTING;
 
             [JsonProperty(PropertyName = nameof(Skills.MINING), NullValueHandling = NullValueHandling.Ignore)]
-            public double? MINING { get; set; }
+            public double? MINING;
 
             [JsonProperty(PropertyName = nameof(Skills.SKINNING), NullValueHandling = NullValueHandling.Ignore)]
-            public double? SKINNING { get; set; }
+            public double? SKINNING;
 
             [JsonProperty(PropertyName = nameof(Skills.WOODCUTTING), NullValueHandling = NullValueHandling.Ignore)]
-            public double? WOODCUTTING { get; set; }
+            public double? WOODCUTTING;
 
-            public ConfigurationResources(double? ACQUIRE, double? CRAFTING, double? MINING, double? SKINNING, double? WOODCUTTING)
+            [JsonProperty(PropertyName = nameof(Skills.FISHING), NullValueHandling = NullValueHandling.Ignore)]
+            public double? FISHING;
+
+            public ConfigurationResources(double? ACQUIRE, double? CRAFTING, double? MINING, double? SKINNING, double? WOODCUTTING, double? FISHING = null)
             {
                 this.ACQUIRE = ACQUIRE;
                 this.CRAFTING = CRAFTING;
                 this.MINING = MINING;
                 this.SKINNING = SKINNING;
                 this.WOODCUTTING = WOODCUTTING;
+                this.FISHING = FISHING;
             }
 
             public double Get(Skills skill)
@@ -2600,6 +2981,8 @@ namespace Oxide.Plugins
                         return SKINNING.HasValue ? SKINNING.Value : 0.0;
                     case Skills.WOODCUTTING:
                         return WOODCUTTING.HasValue ? WOODCUTTING.Value : 0.0;
+                    case Skills.FISHING:
+                        return FISHING.HasValue ? FISHING.Value : 0.0;
                 }
 
                 return 0;
@@ -2624,6 +3007,9 @@ namespace Oxide.Plugins
                     case Skills.WOODCUTTING:
                         WOODCUTTING = value;
                         break;
+                    case Skills.FISHING:
+                        FISHING = value;
+                        break;
                 }
             }
         }
@@ -2631,27 +3017,31 @@ namespace Oxide.Plugins
         public class ConfigurationColors
         {
             [JsonProperty(PropertyName = nameof(Skills.ACQUIRE))]
-            public string ACQUIRE { get; set; }
+            public string ACQUIRE;
 
             [JsonProperty(PropertyName = nameof(Skills.CRAFTING))]
-            public string CRAFTING { get; set; }
+            public string CRAFTING;
 
             [JsonProperty(PropertyName = nameof(Skills.MINING))]
-            public string MINING { get; set; }
+            public string MINING;
 
             [JsonProperty(PropertyName = nameof(Skills.SKINNING))]
-            public string SKINNING { get; set; }
+            public string SKINNING;
 
             [JsonProperty(PropertyName = nameof(Skills.WOODCUTTING))]
-            public string WOODCUTTING { get; set; }
+            public string WOODCUTTING;
 
-            public ConfigurationColors(string ACQUIRE, string CRAFTING, string MINING, string SKINNING, string WOODCUTTING)
+            [JsonProperty(PropertyName = nameof(Skills.FISHING))]
+            public string FISHING;
+
+            public ConfigurationColors(string ACQUIRE, string CRAFTING, string MINING, string SKINNING, string WOODCUTTING, string FISHING = "0 0.75 1 0.5")
             {
                 this.ACQUIRE = ACQUIRE;
                 this.CRAFTING = CRAFTING;
                 this.MINING = MINING;
                 this.SKINNING = SKINNING;
                 this.WOODCUTTING = WOODCUTTING;
+                this.FISHING = FISHING;
             }
 
             public string Get(Skills skill)
@@ -2668,6 +3058,8 @@ namespace Oxide.Plugins
                         return SKINNING;
                     case Skills.WOODCUTTING:
                         return WOODCUTTING;
+                    case Skills.FISHING:
+                        return FISHING;
                 }
 
                 return "1 1 1 1";
@@ -2677,22 +3069,22 @@ namespace Oxide.Plugins
         public class ConfigurationCraftingDetails
         {
             [JsonProperty(PropertyName = "Time Spent")]
-            public double time { get; set; }
+            public double time;
 
             [JsonProperty(PropertyName = "XP Per Time Spent")]
-            public double xp { get; set; }
+            public double xp;
 
             [JsonProperty(PropertyName = "Percent Faster Per Level")]
-            public double percent { get; set; }
+            public double percent;
 
             [JsonProperty(PropertyName = "Require Permission For Instant Bulk Craft")]
-            public bool usePermission { get; set; }
+            public bool usePermission;
 
             [JsonProperty(PropertyName = "Instant Bulk Craft Permission Does Not Require Max Level")]
-            public bool noLevelRequirement { get; set; }
+            public bool noLevelRequirement;
 
             [JsonProperty(PropertyName = "Permission For Instant Bulk Crafting At Max Level")]
-            public string Permission { get; set; } = "zlevelsremastered.crafting.instantbulk";
+            public string Permission = "zlevelsremastered.crafting.instantbulk";
 
             [JsonProperty(PropertyName = "Require Inventory Slots")]
             public bool slots;
@@ -2705,45 +3097,135 @@ namespace Oxide.Plugins
             }
         }
 
-        public class ConfigurationCuiPositions
+        public class ConfigurationFishingDetails
         {
-            [JsonProperty(PropertyName = "Width Left")]
-            public string widthLeft { get; set; }
+            [JsonProperty(PropertyName = "XP Per Catch")]
+            public double xpPerCatch = 30.0;
 
-            [JsonProperty(PropertyName = "Width Right")]
-            public string widthRight { get; set; }
+            [JsonProperty(PropertyName = "Extra Fish Chance Per Level (%)")]
+            public double extraFishChancePerLevel = 0.25;
 
-            [JsonProperty(PropertyName = "Height Lower")]
-            public string heightLower { get; set; }
+            [JsonProperty(PropertyName = "Maximum Extra Fish Chance (%)")]
+            public double maxExtraFishChance = 50.0;
+        }
 
-            [JsonProperty(PropertyName = "Height Upper")]
-            public string heightUpper { get; set; }
-
-            public ConfigurationCuiPositions(string widthLeft, string widthRight, string heightLower, string heightUpper)
+        public class Vector2Converter : JsonConverter
+        {
+            public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
             {
-                this.widthLeft = widthLeft;
-                this.widthRight = widthRight;
-                this.heightLower = heightLower;
-                this.heightUpper = heightUpper;
+                if (reader.TokenType == JsonToken.Null)
+                {
+                    return Vector2.zero;
+                }
+
+                if (reader.TokenType == JsonToken.String && TryParseOffset(reader.Value as string, out Vector2 vector))
+                {
+                    return vector;
+                }
+
+                if (reader.TokenType == JsonToken.StartObject)
+                {
+                    var values = serializer.Deserialize(reader, typeof(Dictionary<string, float>)) as Dictionary<string, float>;
+                    if (values != null && values.TryGetValue("x", out float x) && values.TryGetValue("y", out float y))
+                    {
+                        return new Vector2(x, y);
+                    }
+                }
+
+                throw new JsonSerializationException($"Invalid Vector2 value for {objectType.Name}.");
+            }
+
+            public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
+            {
+                writer.WriteValue(Vec2ToString((Vector2)value));
+            }
+
+            public override bool CanConvert(Type objectType) => objectType == typeof(Vector2);
+        }
+
+        public class UiOffsets
+        {
+            [JsonProperty(PropertyName = "Offset Min")]
+            [JsonConverter(typeof(Vector2Converter))]
+            public Vector2 Min;
+
+            [JsonProperty(PropertyName = "Offset Max")]
+            [JsonConverter(typeof(Vector2Converter))]
+            public Vector2 Max;
+
+            [JsonProperty(PropertyName = "Normalized Anchor")]
+            [JsonConverter(typeof(Vector2Converter))]
+            public Vector2 NormalizedAnchor;
+
+            public UiOffsets()
+            {
+                Min = Vector2.zero;
+                Max = Vector2.zero;
+                NormalizedAnchor = Vector2.zero;
+            }
+
+            public UiOffsets(Vector2 min, Vector2 max, Vector2 normalizedAnchor)
+            {
+                Min = min;
+                Max = max;
+                NormalizedAnchor = normalizedAnchor;
+            }
+
+            internal string MinString => Vec2ToString(Min);
+            internal string MaxString => Vec2ToString(Max);
+        }
+
+        public class ConfigurationCuiPositions : UiOffsets
+        {
+            [JsonProperty(PropertyName = "Width Left", NullValueHandling = NullValueHandling.Ignore)]
+            public string widthLeft;
+
+            [JsonProperty(PropertyName = "Width Right", NullValueHandling = NullValueHandling.Ignore)]
+            public string widthRight;
+
+            [JsonProperty(PropertyName = "Height Lower", NullValueHandling = NullValueHandling.Ignore)]
+            public string heightLower;
+
+            [JsonProperty(PropertyName = "Height Upper", NullValueHandling = NullValueHandling.Ignore)]
+            public string heightUpper;
+
+            public ConfigurationCuiPositions() : base(new Vector2(-67.2f, -36.9f), new Vector2(67.2f, 36.9f), new Vector2(0.7775f, 0.07125f)) { }
+
+            public void ConvertOldBounds()
+            {
+                if (!TryParse(widthLeft, out float left) || !TryParse(widthRight, out float right) || !TryParse(heightLower, out float lower) || !TryParse(heightUpper, out float upper))
+                {
+                    return;
+                }
+
+                float width = (right - left) * 1280f;
+                float height = (upper - lower) * 720f;
+                Min = new Vector2(width * -0.5f, height * -0.5f);
+                Max = new Vector2(width * 0.5f, height * 0.5f);
+                NormalizedAnchor = new Vector2((left + right) * 0.5f, (lower + upper) * 0.5f);
+                widthLeft = widthRight = heightLower = heightUpper = null;
             }
         }
 
         public class ConfigurationSkillColors
         {
             [JsonProperty(PropertyName = nameof(Skills.ACQUIRE))]
-            public string ACQUIRE { get; set; } = "#7700AA";
+            public string ACQUIRE = "#7700AA";
 
             [JsonProperty(PropertyName = nameof(Skills.CRAFTING))]
-            public string CRAFTING { get; set; } = "#00FF00";
+            public string CRAFTING = "#00FF00";
 
             [JsonProperty(PropertyName = nameof(Skills.MINING))]
-            public string MINING { get; set; } = "#0000FF";
+            public string MINING = "#0000FF";
 
             [JsonProperty(PropertyName = nameof(Skills.SKINNING))]
-            public string SKINNING { get; set; } = "#FF0000";
+            public string SKINNING = "#FF0000";
 
             [JsonProperty(PropertyName = nameof(Skills.WOODCUTTING))]
-            public string WOODCUTTING { get; set; } = "#FF9900";
+            public string WOODCUTTING = "#FF9900";
+
+            [JsonProperty(PropertyName = nameof(Skills.FISHING))]
+            public string FISHING = "#00BFFF";
 
             public string Get(Skills skill)
             {
@@ -2759,6 +3241,8 @@ namespace Oxide.Plugins
                         return SKINNING;
                     case Skills.WOODCUTTING:
                         return WOODCUTTING;
+                    case Skills.FISHING:
+                        return FISHING;
                 }
 
                 return "#FF0000";
@@ -2768,19 +3252,22 @@ namespace Oxide.Plugins
         public class RewardType
         {
             [JsonProperty(PropertyName = "Acquire")]
-            public double Acquire { get; set; }
+            public double Acquire;
 
             [JsonProperty(PropertyName = "Crafting")]
-            public double Crafting { get; set; }
+            public double Crafting;
 
             [JsonProperty(PropertyName = "Mining")]
-            public double Mining { get; set; }
+            public double Mining;
 
             [JsonProperty(PropertyName = "Skinning")]
-            public double Skinning { get; set; }
+            public double Skinning;
 
             [JsonProperty(PropertyName = "Woodcutting")]
-            public double Woodcutting { get; set; }
+            public double Woodcutting;
+
+            [JsonProperty(PropertyName = "Fishing")]
+            public double Fishing;
 
             public double Get(Skills skill)
             {
@@ -2791,6 +3278,7 @@ namespace Oxide.Plugins
                     case Skills.MINING: return Mining;
                     case Skills.SKINNING: return Skinning;
                     case Skills.WOODCUTTING: return Woodcutting;
+                    case Skills.FISHING: return Fishing;
                     default: return 0.0;
                 }
             }
@@ -2799,13 +3287,13 @@ namespace Oxide.Plugins
         public class Rewards
         {
             [JsonProperty(PropertyName = "Economics Money")]
-            public RewardType Money { get; set; } = new();
+            public RewardType Money = new();
 
             [JsonProperty(PropertyName = "ServerRewards Points")]
-            public RewardType Points { get; set; } = new();
+            public RewardType Points = new();
 
             [JsonProperty(PropertyName = "SkillTree XP")]
-            public RewardType XP { get; set; } = new();
+            public RewardType XP = new();
         }
 
         public void GiveReward(BasePlayer player, Skills skill, double level)
@@ -2852,12 +3340,12 @@ namespace Oxide.Plugins
         }
 
         private Configuration config = new();
-        private readonly ConfigurationResources pointsPerPowerTool;
+        //private ConfigurationResources pointsPerPowerTool;
         private ConfigurationResources pointsPerHitCurrent;
-        private readonly ConfigurationResources pointsPerPowerToolAtNight;
+        //private ConfigurationResources pointsPerPowerToolAtNight;
         private ConfigurationResources pointsPerHitPowerToolCurrent;
         private ConfigurationResources resourceMultipliersCurrent;
-        private readonly Dictionary<Skills, int> skillIndex = new();
+        private Dictionary<Skills, int> skillIndex = new();
 
         protected override void LoadConfig()
         {
@@ -2866,7 +3354,7 @@ namespace Oxide.Plugins
             try
             {
                 config = Config.ReadObject<Configuration>();
-                if (config is null) LoadDefaultConfig();
+                if (config == null) LoadDefaultConfig();
                 canSaveConfig = true;
             }
             catch (Exception ex)
@@ -2875,8 +3363,26 @@ namespace Oxide.Plugins
                 LoadDefaultConfig();
                 return;
             }
-            CheckStartingStats();
+            LoadDefaultMessages();
+            NormalizeConfig();
             SaveConfig();
+        }
+
+        private void NormalizeConfig()
+        {
+            config.cui ??= new();
+            config.cui.Normalize();
+            if (string.IsNullOrWhiteSpace(config.functions.collectiblePickupHook)) config.functions.collectiblePickupHook = nameof(OnCollectiblePickup);
+            config.functions.collectiblePickupHook = config.functions.GetCollectiblePickupHook;
+            config.settings.fishingDetails ??= new();
+            if (string.IsNullOrWhiteSpace(config.settings.colors.FISHING)) config.settings.colors.FISHING = "#00BFFF";
+            config.settings.levelCaps.FISHING ??= 200.0;
+            config.settings.percentLostOnDeath.FISHING ??= 50.0;
+            config.settings.percentLostOnSuicide.FISHING ??= 0.0;
+            config.settings.fishingDetails.xpPerCatch = Math.Max(0.0, config.settings.fishingDetails.xpPerCatch);
+            config.settings.fishingDetails.extraFishChancePerLevel = Math.Max(0.0, config.settings.fishingDetails.extraFishChancePerLevel);
+            config.settings.fishingDetails.maxExtraFishChance = Math.Clamp(config.settings.fishingDetails.maxExtraFishChance, 0.0, 100.0);
+            CheckStartingStats();
         }
 
         public void CheckStartingStats()
@@ -2931,6 +3437,16 @@ namespace Oxide.Plugins
                 config.settings.stats.woodcutting_points += value;
                 pi.WOODCUTTING_POINTS += value;
             }
+
+            var FISHING = getExperiencePercentProc(pi, Skills.FISHING);
+
+            if (FISHING < 0.0)
+            {
+                var value = Math.Ceiling(getPointsNeededForNextLevel(Math.Max(1.0, pi.FISHING_LEVEL)) * (-1 * FISHING) / 100);
+                Puts("Invalid fishing starting points: {0} ({1}% multiplier) resulting in {2}% towards next level. Points adjusted to: {3}", pi.FISHING_POINTS, pi.XP_MULTIPLIER, FISHING, value);
+                config.settings.stats.fishing_points += value;
+                pi.FISHING_POINTS += value;
+            }
         }
 
         private bool canSaveConfig = true;
@@ -2950,7 +3466,24 @@ namespace Oxide.Plugins
 
         protected override void LoadDefaultMessages()
         {
-            lang.RegisterMessages(new()
+            string[] keys = new string[]
+            {
+                "Default stats UI position saved and all player positions reset.", "Stats UI position reset.", "Stats UI move button hidden. Use /statsui move to move the UI.", "Stats UI move button shown.", "The stats UI move button is disabled. Use /statsui move to move the UI.",
+                "<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>", "/stats - Displays your stats.", "/statsui - Enable/Disable stats UI. Use /statsui reset to restore its position.", "/statsui move - Start/finish moving the UI, or click DONE to finish moving the UI. /statsui button - Show/hide the move button.",
+                "/statsonoff - Enable/Disable whole leveling.", "/statinfo - Displays information about skills.", "/stathelp - Displays the help.", "Lv.", "MAX", "* -{0} {1} XP.", "Syntax: zl.pointsperhit skill number", "Possible skills are: WC, M, S, A, C, *(All skills)", "Incorrect number. Must be greater than or equal to 1", 
+                "Incorrect skill. Possible skills are: WC, M, S, A, C, *(All skills).", "PlayerData is NULL!", "Incorrect number. Must be greater than 0", "Userdata was successfully reset to zero", "Incorrect skill. Possible skills are: WC, M, S, A, C, F, *(All skills).", "Penalty is now enabled.", "Penalty is now disabled.", "Current points per hit:",
+                "New points per hit:", "Syntax: zl.lvl name|steamid skill [OPERATOR]NUMBER", "Example: zl.lvl Player WC /2 -- Player gets his WC level divided by 2.", "Example: zl.lvl * * +3 -- Everyone currently playing in the server gets +3 for all skills.", "Example: zl.lvl ** * /2 -- Everyone (including offline players) gets their level divided by 2.",
+                "Instead of names you can use wildcard(*): * - affects online players, ** - affects all players", "Possible operators: *(XP Modified %), +(Adds level), -(Removes level), /(Divides level)", " {0} > {1} |", "Current XP multiplier for player '{0}' is {1}% with vip raising total to {2}%", "Current XP multiplier for player '{0}' is {1}%",
+                "New XP multiplier for player '{0}' is {1}% with vip raising total to {2}%", "New XP multiplier for player '{0}' is {1}%", "FieldInfo", "Level", "Points", "XPMultiplier is changeable for all skills! Use * instead of {0}.", "ALL ONLINE PLAYERS", "ALL PLAYERS", "XP rates has changed to {0}% of normal XP for {1}", "{0} / {1} entries in datafile can be removed",
+                "{0} / {1} entries in datafile have been removed", "Penalty is currently enabled.", "Penalty is currently disabled.", "Time alive: {0}", "XP rates for you are {0}%", "(DISABLED)", "<color={0}>{1}</color> {2}", "XP per catch: <color={0}>{1:#0.##}</color>", "Bonus: <color={0}>Each level after 1 adds a {1:#0.##}% chance to catch one extra fish, up to {2:#0.##}%.</color>",
+                "XP gain: <color={0}>You get {1} XP per {2}s spent crafting.</color>", "Bonus: <color={0}>Crafting time is decreased by {1}% per every level.</color>", "XP per hit: <color={0}>{1}</color>", "Bonus materials per level: <color={0}>{1:#0.##} %</color>", "shortname (itemid)", "bait", "depth", "water", "weight", "type", "any", "junk", "fish", "catchables:\n{0}", "({0} > {1}) ",
+                "\nChanges for '{0}': {1}", "{0} Lvl for [{1}] set to: [{2}]", "{0:0} weeks", "{0:0} days", "{0:0} hours", "{0:0} minutes", "{0:0} seconds", "DONE", "MOVE", "New save detected...", "Stats can be reset by > zl.reset <", "Nightbonus points enabled", "Nightbonus points disabled", "There is problem obtaining task.blueprint on 'OnItemCraftFinished' hook! This is usually caused by some incompatable plugins.",
+                "{0} ({1}) reset userdata to zero", "CraftData threw an exception!", "Crafting data is null and has been reset!", "Crafting list is null and has been reset!", "StoredData threw an exception!", "Data is null, resetting to defaults!", "Wiping data... new save detected", "Generating new item list...", "Loaded {0} items (Enabled: {1} | Inactive: {2})",
+                "Invalid acquire starting points: {0} ({1}% multiplier) resulting in {2}% towards next level. Points adjusted to: {3}", "Invalid crafting starting points: {0} ({1}% multiplier) resulting in {2}% towards next level. Points adjusted to: {3}", "Invalid mining starting points: {0} ({1}% multiplier) resulting in {2}% towards next level. Points adjusted to: {3}",
+                "Invalid skinning starting points: {0} ({1}% multiplier) resulting in {2}% towards next level. Points adjusted to: {3}", "Invalid woodcutting starting points: {0} ({1}% multiplier) resulting in {2}% towards next level. Points adjusted to: {3}", "Invalid fishing starting points: {0} ({1}% multiplier) resulting in {2}% towards next level. Points adjusted to: {3}",
+                "Updating item list from protocol {0} to protocol {1}.", "WARNING: {0} picked up undefined item: {1}. Defaulting to {2} skill.",
+            };
+            Dictionary<string, string> messages = new()
             {
                 {"StatsHeadline", "Level stats (/statinfo - To get more information about skills)"},
                 {"StatsText",   "-{0}\nLevel: {1} (+{4}% bonus) \nXP: {2}/{3} [{5}].\n<color=red>-{6} XP loss on death.</color>"},
@@ -2962,6 +3495,7 @@ namespace Oxide.Plugins
                 {"MININGSkill", "Mining"},
                 {"SKINNINGSkill", "Skinning"},
                 {"CRAFTINGSkill", "Crafting" },
+                {"FISHINGSkill", "Fishing" },
                 {"ACQUIRESkill", "Acquire" },
                 {"XPM", "XP Multiplier"},
                 {"STATS", "Stats for player: "},
@@ -2974,13 +3508,16 @@ namespace Oxide.Plugins
                 {"NightBonusOff", "Nightbonus for points per hit disabled"},
                 {"PluginPlayerOn", "The plugin functions are now enabled again"},
                 {"PluginPlayerOff", "The plugin functions are now disabled for your character"},
-                {"Lv.", "Lv."},
-                {"MAX", "MAX"},
                 {"SkillTreeXP", "You have received <color=#FFFF00>{0} XP</color> for leveling up!"},
                 {"ServerRewardPoints", "You have received <color=#FFFF00>{0} RP</color> for leveling up!"},
                 {"EconomicsDeposit", "You have received <color=#FFFF00>${0}</color> for leveling up!"},
                 {"NoSlots", "You don't have enough slots to craft!"},
-            }, this);
+            };
+            for (int index = 0; index < keys.Length; index++)
+            {
+                messages[keys[index]] = keys[index];
+            }
+            lang.RegisterMessages(messages, this);
         }
 
         #endregion Config
@@ -3004,6 +3541,9 @@ namespace Oxide.Plugins
                         return getGathMult(GetLevel(userID, skill), Skills.SKINNING);
                     case "WC":
                         return getGathMult(GetLevel(userID, skill), Skills.WOODCUTTING);
+                    case "F":
+                    case "FISHING":
+                        return 1.0 + GetFishingBonusChance(GetLevel(userID, skill)) / 100.0;
                 }
             }
 
@@ -3012,7 +3552,7 @@ namespace Oxide.Plugins
 
         private double GetLevel(ulong userID, string skill = "A")
         {
-            if (_storedData.PlayerInfo.TryGetValue(userID, out var pi))
+            if (data.PlayerInfo.TryGetValue(userID, out var pi))
             {
                 switch (skill.ToUpper())
                 {
@@ -3031,6 +3571,9 @@ namespace Oxide.Plugins
                     case "WC":
                     case "WOODCUTTING":
                         return pi.WOODCUTTING_LEVEL;
+                    case "F":
+                    case "FISHING":
+                        return pi.FISHING_LEVEL;
                 }
             }
 
@@ -3041,8 +3584,7 @@ namespace Oxide.Plugins
         {
             if (playerid != 0)
             {
-                PlayerInfo pi = GetPlayerInfo(playerid);
-                if (pi is null) return string.Empty;
+                var pi = GetPlayerInfo(playerid);
                 return pi.ACQUIRE_LEVEL + "|" +
                     pi.ACQUIRE_POINTS + "|" +
                     pi.CRAFTING_LEVEL + "|" +
@@ -3056,17 +3598,19 @@ namespace Oxide.Plugins
                     pi.SKINNING_POINTS + "|" +
                     pi.WOODCUTTING_LEVEL + "|" +
                     pi.WOODCUTTING_POINTS + "|" +
-                    getXpMulti(pi, playerid.ToString());
+                    getXpMulti(pi, playerid.ToString()) + "|" +
+                    pi.FISHING_LEVEL + "|" +
+                    pi.FISHING_POINTS;
             }
             return string.Empty;
         }
 
         private bool api_SetPlayerInfo(ulong userid, string data)
         {
-            if (userid == 0 || data is null) { return false; }
-            if (!_storedData.PlayerInfo.TryGetValue(userid, out var pi))
+            if (userid == 0 || data == null) { return false; }
+            if (!this.data.PlayerInfo.TryGetValue(userid, out var pi))
             {
-                _storedData.PlayerInfo[userid] = pi = CreatePlayerInfo();
+                this.data.PlayerInfo[userid] = pi = CreatePlayerInfo();
                 pi.LAST_DEATH = ToEpochTime(DateTime.UtcNow);
                 pi.CUI = config.generic.playerCuiDefaultEnabled;
                 pi.ENABLED = config.generic.playerPluginDefaultEnabled;
@@ -3090,10 +3634,14 @@ namespace Oxide.Plugins
             pi.WOODCUTTING_LEVEL = double.Parse(split[11]);
             pi.WOODCUTTING_POINTS = double.Parse(split[12]);
             pi.XP_MULTIPLIER = double.Parse(split[13]);
+            if (split.Length >= 16)
+            {
+                pi.FISHING_LEVEL = double.Parse(split[14]);
+                pi.FISHING_POINTS = double.Parse(split[15]);
+            }
             BasePlayer target = BasePlayer.FindByID(userid);
             if (target != null && target.IsConnected)
             {
-                DestroyGUI(target);
                 CreateGUI(target, pi);
             }
             return true;
