@@ -14,7 +14,7 @@ using Newtonsoft.Json.Converters;
 
 namespace Oxide.Plugins
 {
-    [Info("ZLevels Remastered", "nivex", "3.3.1")]
+    [Info("ZLevels Remastered", "nivex", "3.3.2")]
     [Description("Lets players level up as they harvest resources, fish, and craft")]
 
     class ZLevelsRemastered : RustPlugin
@@ -328,8 +328,7 @@ namespace Oxide.Plugins
 
             foreach (var player in BasePlayer.allPlayerList)
             {
-                var pi = GetPlayerInfo(player);
-                if (pi != null && player.IsConnected) CreateGUI(player, pi);
+                if (player.IsConnected) CreateGUI(player);
             }
 
             Puts("Stats can be reset by > zl.reset <");
@@ -338,7 +337,7 @@ namespace Oxide.Plugins
             RegisterCommands();
         }
 
-        private void OnPlayerConnected(BasePlayer player) => OnPlayerSleepEnded(player);
+        private void OnPlayerConnected(BasePlayer player) => CreateGUI(player);
 
         private void OnPlayerDisconnected(BasePlayer player)
         {
@@ -346,11 +345,11 @@ namespace Oxide.Plugins
             if (player != null) GetPlayerInfo(player);
         }
 
-        private void OnEntityKill(BasePlayer player) => OnPlayerSleep(player);
+        private void OnEntityKill(BasePlayer player) => DestroyGUI(player);
 
-        private void OnPlayerRespawned(BasePlayer player) => OnPlayerSleepEnded(player);
+        private void OnPlayerRespawned(BasePlayer player) => CreateGUI(player);
 
-        private void OnPlayerSleepEnded(BasePlayer player) => CreateGUI(player, GetPlayerInfo(player));
+        private void OnPlayerSleepEnded(BasePlayer player) => CreateGUI(player);
 
         private void OnPlayerSleep(BasePlayer player) => DestroyGUI(player);
 
@@ -697,7 +696,6 @@ namespace Oxide.Plugins
                                 task.blueprint = UnityEngine.Object.Instantiate(task.blueprint);
                             task.blueprint.amountToCreate *= task.amount;
                             crafter.inventory.crafting.FinishCrafting(task);
-                            task.cancelled = true;
                             return true;
                         }
                     }
@@ -754,7 +752,6 @@ namespace Oxide.Plugins
         }
         private void ReturnCraft(ItemCraftTask task, BasePlayer crafter)
         {
-            task.cancelled = true;
             Message(crafter, "NoSlots");
             foreach (var item in task.takenItems)
             {
@@ -1036,7 +1033,7 @@ namespace Oxide.Plugins
             SaveData();
             foreach (var player in BasePlayer.activePlayerList)
             {
-                CreateGUI(player, GetPlayerInfo(player));
+                CreateGUI(player);
             }
             Reply(user, "Userdata was successfully reset to zero");
             Puts("{0} ({1}) reset userdata to zero", user.Name, user.Id);
@@ -2315,8 +2312,11 @@ namespace Oxide.Plugins
 
         private void DestroyGUI(BasePlayer player)
         {
-            CuiHelper.DestroyUi(player, "ZLevelsUI");
-            CuiHelper.DestroyUi(player, "ZLevelsUIMove");
+            if (CommunityEntity.ServerInstance != null)
+            {
+                CuiHelper.DestroyUi(player, "ZLevelsUI");
+                CuiHelper.DestroyUi(player, "ZLevelsUIMove");
+            }
             uiMovePlayers.Remove(player.userID);
         }
 
@@ -2418,6 +2418,8 @@ namespace Oxide.Plugins
                 max = new(right, bottom + height);
             }
         }
+
+        public void CreateGUI(BasePlayer player) => CreateGUI(player, GetPlayerInfo(player));
 
         private void CreateGUI(BasePlayer player, PlayerInfo pi)
         {
@@ -3470,7 +3472,7 @@ namespace Oxide.Plugins
             {
                 "Default stats UI position saved and all player positions reset.", "Stats UI position reset.", "Stats UI move button hidden. Use /statsui move to move the UI.", "Stats UI move button shown.", "The stats UI move button is disabled. Use /statsui move to move the UI.",
                 "<size=18><color=orange>ZLevels</color></size><size=14><color=#ce422b>REMASTERED</color></size>", "/stats - Displays your stats.", "/statsui - Enable/Disable stats UI. Use /statsui reset to restore its position.", "/statsui move - Start/finish moving the UI, or click DONE to finish moving the UI. /statsui button - Show/hide the move button.",
-                "/statsonoff - Enable/Disable whole leveling.", "/statinfo - Displays information about skills.", "/stathelp - Displays the help.", "Lv.", "MAX", "* -{0} {1} XP.", "Syntax: zl.pointsperhit skill number", "Possible skills are: WC, M, S, A, C, *(All skills)", "Incorrect number. Must be greater than or equal to 1", 
+                "/statsonoff - Enable/Disable whole leveling.", "/statinfo - Displays information about skills.", "/stathelp - Displays the help.", "Lv.", "MAX", "* -{0} {1} XP.", "Syntax: zl.pointsperhit skill number", "Possible skills are: WC, M, S, A, C, *(All skills)", "Incorrect number. Must be greater than or equal to 1",
                 "Incorrect skill. Possible skills are: WC, M, S, A, C, *(All skills).", "PlayerData is NULL!", "Incorrect number. Must be greater than 0", "Userdata was successfully reset to zero", "Incorrect skill. Possible skills are: WC, M, S, A, C, F, *(All skills).", "Penalty is now enabled.", "Penalty is now disabled.", "Current points per hit:",
                 "New points per hit:", "Syntax: zl.lvl name|steamid skill [OPERATOR]NUMBER", "Example: zl.lvl Player WC /2 -- Player gets his WC level divided by 2.", "Example: zl.lvl * * +3 -- Everyone currently playing in the server gets +3 for all skills.", "Example: zl.lvl ** * /2 -- Everyone (including offline players) gets their level divided by 2.",
                 "Instead of names you can use wildcard(*): * - affects online players, ** - affects all players", "Possible operators: *(XP Modified %), +(Adds level), -(Removes level), /(Divides level)", " {0} > {1} |", "Current XP multiplier for player '{0}' is {1}% with vip raising total to {2}%", "Current XP multiplier for player '{0}' is {1}%",
